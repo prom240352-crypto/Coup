@@ -1,0 +1,14 @@
+{
+  "name": "coup-game",
+  "version": "2.3.0",
+  "description": "Coup - The Dystopian Card Game (Cinematic Edition v2.3 - Enhanced Audio)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node tests/regressions.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.7.2"
+  }
+}
