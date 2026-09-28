@@ -1,3 +1,7 @@
+# Audio Reliability Fix
+- Added one shared Web Audio context with passive pointer/touch unlock and resume handling for mobile Safari.
+- Added persisted master mute/volume, bounded sound overlap, and distinct event-driven sounds for actions, challenges, turns, influence loss, and game start/end.
+
 # Changelog — 2.2.0 (Animation Integration & Celebration Upgrade)
 
 ## Added

@@ -25,17 +25,20 @@
     { action: 'steal', label: 'Steal', detail: 'Captain', icon: 'S', color: 'captain' }
   ];
   const socket = typeof window.io === 'function' ? window.io() : null;
+  const soundEngine = window.CoupSound || null;
   const storageKey = 'coup-last-room';
   let state = null;
   let pendingTargetAction = null;
+  let pendingNewRoomName = null;
+  let pendingLeaveRoom = null;
+  let createNewRoomInProgress = false;
   let selectedExchange = new Set();
   let exchangeSignature = '';
   let toastTimeout;
   let tutorialIndex = 0;
-  let soundEnabled = true;
-  let soundVolume = 0.35;
-  let audioContext = null;
-  let lastLogLength = 0;
+  let previousAudioSnapshot = null;
+  let previousAudioLog = [];
+  let audioLogSequence = 0;
 
   const byId = id => document.getElementById(id);
   const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -102,39 +105,142 @@
     byId('tutorial-next').textContent = tutorialIndex === tutorialSteps.length - 1 ? 'Done' : 'Next';
   }
 
-  function playSound(kind = 'tap') {
-    if (!soundEnabled || soundVolume <= 0) return;
-    try {
-      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-      if (!AudioContextClass) return;
-      audioContext ||= new AudioContextClass();
-      if (audioContext.state === 'suspended') audioContext.resume();
-      const notes = kind === 'action' ? [440, 554] : kind === 'challenge' ? [220, 330] : [660];
-      notes.forEach((frequency, index) => {
-        const start = audioContext.currentTime + index * 0.07;
-        const oscillator = audioContext.createOscillator();
-        const gain = audioContext.createGain();
-        oscillator.type = 'sine';
-        oscillator.frequency.setValueAtTime(frequency, start);
-        gain.gain.setValueAtTime(0.0001, start);
-        gain.gain.exponentialRampToValueAtTime(Math.max(0.0002, soundVolume * 0.045), start + 0.015);
-        gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.18);
-        oscillator.connect(gain);
-        gain.connect(audioContext.destination);
-        oscillator.start(start);
-        oscillator.stop(start + 0.19);
-      });
-    } catch (error) {
-      console.warn('Audio playback is unavailable:', error);
+  function updateSoundControls() {
+    const toggle = byId('sound-toggle');
+    const soundState = soundEngine?.getState();
+    const enabled = soundState?.enabled ?? false;
+    toggle.textContent = enabled ? '♫' : '×';
+    toggle.setAttribute('aria-label', enabled ? 'Turn sound off' : 'Turn sound on');
+    toggle.title = enabled ? 'Turn sound off' : 'Turn sound on';
+    toggle.disabled = !soundState?.supported;
+    if (!soundState?.supported) toggle.title = 'Web Audio is not supported in this browser';
+    byId('volume-slider').value = String(Math.round((soundState?.volume ?? 0.65) * 100));
+    byId('volume-slider').disabled = !soundState?.supported;
+    const settingsToggle = byId('sound-toggle-settings');
+    settingsToggle.textContent = `Sound: ${enabled ? 'On' : 'Off'}`;
+    settingsToggle.setAttribute('aria-pressed', String(enabled));
+    settingsToggle.disabled = !soundState?.supported;
+    byId('volume-slider-settings').value = String(Math.round((soundState?.volume ?? 0.65) * 100));
+    byId('volume-slider-settings').disabled = !soundState?.supported;
+    updateAudioDiagnostics();
+  }
+
+  function updateAudioDiagnostics(testResult) {
+    if (!soundEngine) {
+      byId('audio-debug-api').textContent = 'unavailable';
+      byId('audio-debug-context').textContent = 'not created';
+      byId('audio-debug-output').textContent = 'unavailable';
+      byId('audio-debug-enabled').textContent = 'unavailable';
+      byId('audio-debug-volume').textContent = 'unavailable';
+      byId('audio-debug-last-sound').textContent = 'None';
+      byId('audio-debug-error').textContent = 'Sound controller did not load';
+      return;
+    }
+    const soundState = soundEngine.getState();
+    byId('audio-debug-api').textContent = soundState.supported ? `${soundState.api} available` : 'unavailable';
+    byId('audio-debug-context').textContent = soundState.contextState;
+    byId('audio-debug-output').textContent = soundState.outputAvailable ? 'destination available' : 'destination unavailable';
+    byId('audio-debug-enabled').textContent = soundState.enabled ? 'ON' : 'OFF';
+    byId('audio-debug-volume').textContent = `${Math.round(soundState.volume * 100)}%`;
+    byId('audio-debug-last-sound').textContent = soundState.lastSound.at
+      ? `${soundState.lastSound.at} (${soundState.lastSound.type})`
+      : 'None';
+    byId('audio-debug-error').textContent = soundState.lastError || 'None';
+    if (typeof testResult === 'boolean') {
+      byId('audio-test-status').textContent = testResult
+        ? 'Test tone scheduled. If silent, check device output/volume and read Audio Debug.'
+        : soundState.lastError || 'Test tone could not be scheduled.';
     }
   }
 
-  function updateSoundControls() {
-    const toggle = byId('sound-toggle');
-    toggle.textContent = soundEnabled ? '♫' : '×';
-    toggle.setAttribute('aria-label', soundEnabled ? 'Turn sound off' : 'Turn sound on');
-    toggle.title = soundEnabled ? 'Turn sound off' : 'Turn sound on';
-    byId('volume-slider').value = String(Math.round(soundVolume * 100));
+  function playSound(name = 'ui', eventId) {
+    if (soundEngine) void soundEngine.play(name, eventId);
+  }
+
+  function audioEntryKey(entry) {
+    return `${entry.type || ''}:${entry.message || ''}`;
+  }
+
+  function getNewAudioEntries(previous, current) {
+    const maxOverlap = Math.min(previous.length, current.length);
+    for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+      let matches = true;
+      for (let index = 0; index < overlap; index += 1) {
+        if (audioEntryKey(previous[previous.length - overlap + index]) !== audioEntryKey(current[index])) {
+          matches = false;
+          break;
+        }
+      }
+      if (matches) return current.slice(overlap);
+    }
+    return previous.length ? current : [];
+  }
+
+  function processAudioState(nextState) {
+    const nextLog = nextState.log || [];
+    const previous = previousAudioSnapshot;
+    if (!previous) {
+      previousAudioSnapshot = nextState;
+      previousAudioLog = nextLog.slice();
+      return;
+    }
+
+    const addedEntries = getNewAudioEntries(previousAudioLog, nextLog);
+    const eventPrefix = `${nextState.code || 'room'}:${++audioLogSequence}`;
+    let sawCounter = false;
+    let challengedClaimSuccessfully = false;
+    let challengedCounterSuccessfully = false;
+
+    for (const entry of addedEntries) {
+      const eventId = `${eventPrefix}:${entry.type}:${entry.message}`;
+      if (entry.type === 'action') playSound('cardCast', eventId);
+      if (entry.type === 'counter') {
+        sawCounter = true;
+        playSound('counter', eventId);
+      }
+      if (entry.type === 'challenge') {
+        if (/block challenge succeeds/i.test(entry.message)) {
+          challengedCounterSuccessfully = true;
+          challengedClaimSuccessfully = true;
+          playSound('success', eventId);
+        } else if (/challenge succeeds/i.test(entry.message)) {
+          challengedClaimSuccessfully = true;
+          playSound('success', eventId);
+        } else if (/challenge fails/i.test(entry.message)) {
+          playSound('failure', eventId);
+        } else {
+          playSound('challenge', eventId);
+        }
+      }
+    }
+
+    if (previous.state !== 'playing' && nextState.state === 'playing') {
+      playSound('gameStart', `${eventPrefix}:start`);
+    }
+    if (previous.state !== 'finished' && nextState.state === 'finished') {
+      playSound('gameEnd', `${eventPrefix}:end`);
+    }
+
+    for (const oldPlayer of previous.players || []) {
+      const newPlayer = (nextState.players || []).find(player => player.id === oldPlayer.id);
+      if (newPlayer && oldPlayer.cardCount > newPlayer.cardCount) {
+        playSound(newPlayer.cardCount === 0 ? 'elimination' : 'loss', `${eventPrefix}:influence:${newPlayer.id}:${newPlayer.cardCount}`);
+      }
+    }
+
+    const turnChanged = previous.state === 'playing' && nextState.state === 'playing'
+      && previous.currentPlayer !== nextState.currentPlayer;
+    if (turnChanged) {
+      playSound('turn', `${eventPrefix}:turn:${nextState.currentPlayer}`);
+      const actionFailed = challengedClaimSuccessfully && !challengedCounterSuccessfully;
+      const actionBlocked = sawCounter && !challengedCounterSuccessfully && !challengedClaimSuccessfully;
+      if (previous.selectedAction && !actionFailed && !actionBlocked) {
+        playSound('success', `${eventPrefix}:action-success:${previous.selectedAction}`);
+      }
+    }
+
+    previousAudioSnapshot = nextState;
+    previousAudioLog = nextLog.slice();
   }
 
   function emitWithAck(event, payload) {
@@ -155,15 +261,89 @@
     });
   }
 
-  async function createRoom() {
-    const name = byId('player-name').value.trim();
-    if (!name) return setStatus('Enter your name first.');
+  async function createRoom(nameOverride) {
+    const name = (nameOverride || byId('player-name').value).trim();
+    if (!name) {
+      setStatus('Enter your name first.');
+      return { error: 'Enter your name first.' };
+    }
     setStatus('Creating room...');
     const response = await emitWithAck('createRoom', { name });
-    if (response.error) return setStatus(response.error);
+    if (response.error) {
+      setStatus(response.error);
+      return response;
+    }
     saveRoom(response.code, name);
     setStatus(`Room ${response.code} created.`, 'waiting-status');
     byId('room-code-input').value = response.code;
+    return response;
+  }
+
+  function unlockCreateNewRoomButton(message) {
+    createNewRoomInProgress = false;
+    pendingNewRoomName = null;
+    pendingLeaveRoom = null;
+    byId('create-new-room').disabled = false;
+    if (message) setStatus(message);
+  }
+
+  async function finishPendingNewRoom() {
+    if (!createNewRoomInProgress || !pendingNewRoomName || !socket?.connected) return;
+    const name = pendingNewRoomName;
+    pendingNewRoomName = null;
+    const response = await createRoom(name);
+    if (response?.error) {
+      if (!socket.connected) {
+        pendingNewRoomName = name;
+        setStatus('Connection lost. Reconnecting before creating your room...');
+        socket.connect();
+        return;
+      }
+      return unlockCreateNewRoomButton(response.error);
+    }
+    createNewRoomInProgress = false;
+    byId('create-new-room').disabled = false;
+  }
+
+  async function createNewRoomFromResult() {
+    if (createNewRoomInProgress) return;
+    createNewRoomInProgress = true;
+    byId('create-new-room').disabled = true;
+
+    const saved = readSavedRoom();
+    const currentPlayer = state?.players?.[state.myIndex];
+    const name = saved?.name || currentPlayer?.name || byId('player-name').value.trim() || 'Player';
+    const oldCode = state?.code || saved?.code || null;
+    clearSavedRoom();
+    byId('player-name').value = name;
+    byId('winner-modal').classList.remove('active');
+    pendingNewRoomName = name;
+    pendingLeaveRoom = oldCode ? { code: oldCode, name } : null;
+    pendingTargetAction = null;
+    state = null;
+    previousAudioSnapshot = null;
+    previousAudioLog = [];
+    setScreen('lobby');
+    setStatus('Leaving the finished room and creating a new room...');
+
+    if (!socket) return unlockCreateNewRoomButton('The game server is unavailable. You are back at the lobby.');
+    if (!socket.connected) {
+      setStatus('Reconnecting to leave the previous room and create a new one...');
+      socket.connect();
+      return;
+    }
+
+    if (pendingLeaveRoom) {
+      const result = await emitWithAck('leaveRoom', { code: oldCode });
+      if (result.error && socket.connected) return unlockCreateNewRoomButton(result.error);
+      if (!socket.connected) {
+        setStatus('Reconnecting to leave the previous room and create a new one...');
+        socket.connect();
+        return;
+      }
+      pendingLeaveRoom = null;
+    }
+    await finishPendingNewRoom();
   }
 
   async function joinRoom() {
@@ -426,6 +606,32 @@
       byId('rules-modal').classList.add('active');
       return;
     }
+    if (button.id === 'open-audio-settings' || button.id === 'open-audio-settings-game') {
+      updateSoundControls();
+      byId('audio-settings-modal').classList.add('active');
+      return;
+    }
+    if (button.id === 'close-audio-settings') {
+      byId('audio-settings-modal').classList.remove('active');
+      return;
+    }
+    if (button.id === 'test-sound') {
+      byId('audio-test-status').textContent = 'Starting 600 Hz test tone...';
+      const testResult = soundEngine?.testSound();
+      updateAudioDiagnostics();
+      Promise.resolve(testResult).then(result => {
+        updateAudioDiagnostics(Boolean(result));
+        updateSoundControls();
+      });
+      return;
+    }
+    if (button.id === 'sound-toggle-settings') {
+      const wasEnabled = soundEngine?.getState().enabled ?? false;
+      soundEngine?.setEnabled(!wasEnabled);
+      updateSoundControls();
+      if (!wasEnabled) playSound('ui', `settings-toggle:${Date.now()}`);
+      return;
+    }
     if (button.id === 'close-rules') {
       byId('rules-modal').classList.remove('active');
       return;
@@ -436,6 +642,7 @@
       socket?.emit('rematch');
       return;
     }
+    if (button.id === 'create-new-room') return createNewRoomFromResult();
     if (button.id === 'open-tutorial') {
       tutorialIndex = 0;
       renderTutorial();
@@ -458,10 +665,10 @@
       return;
     }
     if (button.id === 'sound-toggle') {
-      soundEnabled = !soundEnabled;
-      try { localStorage.setItem('coup-sound-enabled', String(soundEnabled)); } catch {}
+      const wasEnabled = soundEngine?.getState().enabled ?? false;
+      soundEngine?.setEnabled(!wasEnabled);
       updateSoundControls();
-      if (soundEnabled) playSound();
+      if (!wasEnabled) playSound('ui', `toggle:${Date.now()}`);
       return;
     }
     if (button.dataset.emoji) {
@@ -471,10 +678,12 @@
     }
   });
 
-  byId('volume-slider').addEventListener('input', event => {
-    soundVolume = Number(event.target.value) / 100;
-    try { localStorage.setItem('coup-sound-volume', String(soundVolume)); } catch {}
-  });
+  for (const slider of [byId('volume-slider'), byId('volume-slider-settings')]) {
+    slider.addEventListener('input', event => {
+      soundEngine?.setVolume(Number(event.target.value) / 100);
+      updateSoundControls();
+    });
+  }
 
   byId('room-code-input').addEventListener('input', event => {
     event.target.value = event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5);
@@ -483,6 +692,7 @@
     if (event.key === 'Escape') {
       byId('rules-modal').classList.remove('active');
       byId('tutorial-modal').classList.remove('active');
+      byId('audio-settings-modal').classList.remove('active');
       if (state?.phase !== 'exchange_select') byId('exchange-modal').classList.remove('active');
     }
     if (event.key === 'Enter' && document.activeElement === byId('player-name')) createRoom();
@@ -493,6 +703,26 @@
     socket.on('connect', async () => {
       byId('connection-state').textContent = 'Connected';
       setStatus('Connected. Create a room or join with a code.');
+      if (createNewRoomInProgress) {
+        if (pendingLeaveRoom) {
+          const oldRoom = pendingLeaveRoom;
+          const reconnectResult = await emitWithAck('reconnect', oldRoom);
+          if (!reconnectResult.error) {
+            const leaveResult = await emitWithAck('leaveRoom', { code: oldRoom.code });
+            if (leaveResult.error) {
+              if (!socket.connected) {
+                setStatus('Connection lost. Reconnecting to leave the previous room...');
+                socket.connect();
+                return;
+              }
+              return unlockCreateNewRoomButton(leaveResult.error);
+            }
+          }
+          pendingLeaveRoom = null;
+        }
+        await finishPendingNewRoom();
+        return;
+      }
       const saved = readSavedRoom();
       if (!saved?.code || !saved?.name || state) return;
       byId('player-name').value = saved.name;
@@ -503,11 +733,8 @@
       }
     });
     socket.on('gameState', nextState => {
-      const entries = nextState.log || [];
-      const appended = entries.slice(Math.min(lastLogLength, entries.length));
-      if (appended.some(entry => entry.type === 'action')) playSound('action');
-      else if (appended.some(entry => entry.type === 'challenge' || entry.type === 'counter')) playSound('challenge');
-      lastLogLength = entries.length;
+      if (createNewRoomInProgress && pendingLeaveRoom) return;
+      processAudioState(nextState);
       state = nextState;
       const saved = readSavedRoom();
       if (state.code && saved?.name) saveRoom(state.code, saved.name);
@@ -525,11 +752,6 @@
     setStatus('The Socket.IO client did not load. Reload the page to try again.');
   }
 
-  try {
-    soundEnabled = localStorage.getItem('coup-sound-enabled') !== 'false';
-    const storedVolume = Number(localStorage.getItem('coup-sound-volume'));
-    if (Number.isFinite(storedVolume) && storedVolume >= 0 && storedVolume <= 1) soundVolume = storedVolume;
-  } catch {}
   updateSoundControls();
 
   window.setInterval(updateTimer, 250);

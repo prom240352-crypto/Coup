@@ -41,8 +41,14 @@ function generateCode() {
   return code;
 }
 
+function generateUniqueCode() {
+  let code = generateCode();
+  while (rooms.has(code)) code = generateCode();
+  return code;
+}
+
 function createRoom(hostId, hostName) {
-  const code = generateCode();
+  const code = generateUniqueCode();
   const room = {
     code,
     players: [{ id: hostId, name: hostName, coins: 2, cards: [], alive: true, disconnected: false, disconnectTimer: null }],
@@ -80,6 +86,24 @@ function createRoom(hostId, hostName) {
   };
   rooms.set(code, room);
   return room;
+}
+
+function leaveFinishedRoom(room, playerId) {
+  if (!room || room.state !== 'finished') return { error: 'You can only leave a finished room this way.' };
+  const playerIndex = room.players.findIndex(player => player.id === playerId);
+  if (playerIndex < 0) return { error: 'Player is not in this room.' };
+
+  const [player] = room.players.splice(playerIndex, 1);
+  if (player.disconnectTimer) clearTimeout(player.disconnectTimer);
+  const disconnectTimer = room.disconnectTimers.get(player.name);
+  if (disconnectTimer === player.disconnectTimer) room.disconnectTimers.delete(player.name);
+
+  if (room.players.length === 0) {
+    if (room.timer) clearTimeout(room.timer);
+    if (room.counterChallengeTimer) clearTimeout(room.counterChallengeTimer);
+    rooms.delete(room.code);
+  }
+  return { success: true, code: room.code, remainingPlayers: room.players.length };
 }
 
 function startGame(room) {
@@ -876,6 +900,17 @@ io.on('connection', (socket) => {
     socket.to(room.code).emit('emojiReaction', { emoji, playerId: socket.id });
   });
 
+  socket.on('leaveRoom', (_payload, callback) => {
+    const room = findRoom(socket.id);
+    if (!room) return callback?.({ success: true });
+    if (room.state !== 'finished') return callback?.({ error: 'You can only leave a finished room this way.' });
+
+    const result = leaveFinishedRoom(room, socket.id);
+    if (result.error) return callback?.(result);
+    socket.leave(room.code);
+    callback?.(result);
+  });
+
   // Rematch request
   socket.on('rematch', () => {
     const room = findRoom(socket.id);
@@ -963,7 +998,7 @@ if (require.main === module) {
 }
 
 module.exports = {
-  app, server, io, rooms, CHARACTERS, createDeck, createRoom, startGame, executeAction,
+  app, server, io, rooms, CHARACTERS, createDeck, createRoom, leaveFinishedRoom, startGame, executeAction,
   resolveForeignAid, resolveSteal, resolveExchange, finishExchange, autoDiscardExchange,
   loseInfluence, nextTurn, checkWinner, findRoomByCode
 };
