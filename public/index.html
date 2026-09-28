@@ -197,4 +197,145 @@ body::before{content:'';position:fixed;inset:0;z-index:0;background:radial-gradi
 @keyframes ashFade{0%{opacity:1;transform:scale(1)}100%{opacity:0;transform:scale(.25) translateY(35px)}}
 
 
-.toast-stack{position:fixed;top:58px;right:12px;z-index:180;display:flex;flex-direction:column;gap:8px;pointer-events:none}.game-toast{min-width:180px;max-width:300px;padding:10px 14px;border:1px solid var(--border);border-left:3px solid var(--gold);border-radius:10px;background:rgba(20,20,30,.94);box-shadow:0 10px 30px rgba(0,0,0,.35);backdrop-filter:blur(8px
+.toast-stack{position:fixed;top:58px;right:12px;z-index:180;display:flex;flex-direction:column;gap:8px;pointer-events:none}.game-toast{min-width:180px;max-width:300px;padding:10px 14px;border:1px solid var(--border);border-left:3px solid var(--gold);border-radius:10px;background:rgba(20,20,30,.94);box-shadow:0 10px 30px rgba(0,0,0,.35);backdrop-filter:blur(8px)}
+.game-toast.error{border-left-color:var(--crimson)}
+.lobby-status{min-height:18px;text-align:center;color:var(--text-dim);font-size:12px}
+.seat-target{background:transparent;border:0;color:inherit;font:inherit}
+.opponent-seat button.seat-target{display:flex;flex-direction:column;align-items:center;gap:4px;padding:0}
+.seat-target:focus-visible,.btn:focus-visible,.action-btn:focus-visible,.challenge-option:focus-visible{outline:2px solid var(--gold);outline-offset:3px}
+.exchange-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:16px 0}
+.exchange-card{position:relative;aspect-ratio:2/3;border:2px solid var(--border);border-radius:8px;background:var(--panel2);overflow:hidden;cursor:pointer;color:var(--text)}
+.exchange-card img{width:100%;height:100%;object-fit:cover}
+.exchange-card.selected{border-color:var(--gold);box-shadow:0 0 18px rgba(212,168,67,.4)}
+.exchange-card span{position:absolute;left:0;right:0;bottom:0;padding:4px;background:rgba(0,0,0,.78);font-size:11px;text-align:center}
+.exchange-actions{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.game-message{position:absolute;left:50%;top:calc(50% + 86px);transform:translateX(-50%);z-index:9;max-width:min(78vw,420px);padding:7px 12px;border:1px solid var(--border);border-radius:6px;background:rgba(8,8,16,.82);text-align:center;font-size:12px;color:var(--text-dim)}
+.emoji-bar{position:absolute;right:12px;bottom:14px;z-index:15;display:flex;gap:4px}
+.emoji-bar button{width:36px;height:36px;border:1px solid var(--border);border-radius:50%;background:var(--panel);font-size:18px;cursor:pointer}
+.emoji-float{position:fixed;z-index:170;font-size:36px;pointer-events:none;animation:emojiRise 1.8s ease-out forwards}
+@keyframes emojiRise{to{transform:translateY(-120px) scale(1.25);opacity:0}}
+.modal-copy{color:var(--text-dim);line-height:1.45;margin:12px 0}
+.target-hint{color:var(--gold);text-align:center;font-size:12px;min-height:18px}
+.connection-indicator{font-size:10px;color:var(--text-dim)}
+.rules-btn{top:50px;right:8px}
+.sound-btn{top:auto;bottom:12px;left:12px;transform:none}
+.volume-control{top:auto;bottom:28px;left:60px}
+.tutorial-nav{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:18px}
+.tutorial-step-count{color:var(--text-dim);font-size:12px}
+@media(max-width:600px){
+  .screen{padding:14px}
+  #lobby,#waiting{gap:16px}
+  .lobby-title{font-size:clamp(40px,14vw,62px);letter-spacing:8px}
+  .lobby-box{padding:22px;width:min(400px,94vw)}
+  #game{padding:0}
+  .oval-table{width:96vw;height:min(60vh,460px);border-width:6px}
+  .game-hud{padding:8px 10px}
+  .turn-indicator{max-width:46vw;text-align:center;font-size:11px}
+  .game-log{top:54px;right:6px;width:38vw;max-height:100px;padding:5px;font-size:9px}
+  .opponent-seat{gap:2px;max-width:76px}
+  .seat-avatar{width:36px;height:36px;font-size:13px}
+  .seat-name{max-width:72px;overflow:hidden;text-overflow:ellipsis;font-size:10px}
+  .seat-info{font-size:9px}
+  .player-hand{bottom:10px;gap:10px}
+  .hand-card{width:68px;height:96px}
+  .action-panel{bottom:118px;padding:10px;width:min(500px,94vw);max-height:42vh;overflow:auto}
+  .action-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .action-btn{padding:8px 4px}
+  .challenge-panel{width:min(400px,92vw);padding:16px}
+  .timer-ring{width:92px;height:92px}
+  .timer-text{font-size:20px}
+  .game-message{top:calc(50% + 66px);font-size:10px}
+  .emoji-bar{right:8px;bottom:8px;gap:2px}
+  .emoji-bar button{width:32px;height:32px;font-size:16px}
+  .rules-btn{top:8px;right:8px}
+  .rules-btn .btn{padding:8px 10px;font-size:10px}
+  .volume-control{display:none}
+  .sound-btn{bottom:8px;left:8px}
+  .rules-btn{top:50px;right:8px}
+  .exchange-grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+}
+</style>
+</head>
+<body>
+<main>
+  <section class="screen active" id="lobby" aria-labelledby="lobby-title">
+    <h1 class="lobby-title" id="lobby-title">COUP</h1>
+    <p class="lobby-subtitle">The Dystopian Card Game</p>
+    <div class="lobby-box">
+      <h2>Enter the Court</h2>
+      <div class="input-group">
+        <label for="player-name">Your name</label>
+        <input id="player-name" name="name" maxlength="18" autocomplete="nickname" placeholder="Choose a name">
+      </div>
+      <button class="btn btn-primary" id="create-room" type="button">Create Room</button>
+      <div class="divider"></div>
+      <div class="input-group">
+        <label for="room-code-input">Room code</label>
+        <input id="room-code-input" name="room-code" maxlength="5" autocomplete="off" autocapitalize="characters" placeholder="ABCDE">
+      </div>
+      <button class="btn btn-secondary" id="join-room" type="button">Join Room</button>
+      <button class="btn btn-secondary btn-small" id="open-tutorial" type="button">How to Play</button>
+      <p class="lobby-status" id="lobby-status" role="status" aria-live="polite">Connecting to the game server...</p>
+    </div>
+  </section>
+
+  <section class="screen" id="waiting" aria-labelledby="waiting-title">
+    <h1 class="lobby-title" id="waiting-title">COUP</h1>
+    <p class="lobby-subtitle">Waiting for players</p>
+    <div class="lobby-box">
+      <h2>Room Code</h2>
+      <button class="waiting-code btn btn-secondary" id="copy-room-code" type="button" aria-label="Copy room code">-----</button>
+      <div class="player-list" id="waiting-players" aria-live="polite"></div>
+      <button class="btn btn-primary" id="start-game" type="button" disabled>Start Game</button>
+      <p class="lobby-status" id="waiting-status" role="status" aria-live="polite"></p>
+    </div>
+  </section>
+
+  <section class="screen" id="game" aria-label="Coup game table">
+    <header class="game-hud">
+      <div><div class="game-code" id="game-code"></div><div class="connection-indicator" id="connection-state">Connecting</div></div>
+      <div class="turn-indicator" id="turn-indicator" aria-live="polite"></div>
+      <div class="coin-display"><span class="coin-icon">C</span><span id="my-coins">0</span></div>
+    </header>
+    <button class="sound-btn btn btn-secondary btn-icon" id="sound-toggle" type="button" aria-label="Turn sound off" title="Turn sound off">♫</button>
+    <label class="volume-control"><span class="connection-indicator">VOL</span><input class="volume-slider" id="volume-slider" type="range" min="0" max="100" value="35" aria-label="Sound volume"></label>
+    <button class="rules-btn btn btn-secondary btn-small" id="open-rules" type="button">Rules</button>
+    <div class="table-container" id="table-container">
+      <div class="oval-table" aria-hidden="true">
+        <div class="table-center">
+          <div class="deck-pile" aria-label="Deck">
+            <span class="deck-card"></span><span class="deck-card"></span><span class="deck-card"></span><span class="deck-card"></span><span class="deck-card"></span><span class="deck-card"></span><span class="deck-card"></span>
+            <span class="deck-count" id="deck-count">0</span>
+          </div>
+          <div class="coin-pile"><span class="coin-pile-visual">C</span><span id="treasury-count">Treasury</span></div>
+        </div>
+      </div>
+      <div class="timer-ring" id="timer-ring" aria-hidden="true"><svg viewBox="0 0 120 120"><circle class="bg" cx="60" cy="60" r="54"></circle><circle class="progress" id="timer-progress" cx="60" cy="60" r="54"></circle></svg><span class="timer-text" id="timer-text"></span></div>
+      <div class="game-message" id="game-message" aria-live="polite"></div>
+      <div id="player-seats"></div>
+    </div>
+    <div class="game-log" id="game-log" aria-label="Game log" aria-live="polite"></div>
+    <div class="player-hand" id="player-hand" aria-label="Your influence"></div>
+    <section class="action-panel" id="action-panel" aria-label="Available actions"><div id="action-content"></div></section>
+    <section class="challenge-panel" id="challenge-panel" aria-live="polite"></section>
+    <div class="emoji-bar" aria-label="Reactions"><button type="button" data-emoji="👏" aria-label="Clap">👏</button><button type="button" data-emoji="😂" aria-label="Laugh">😂</button><button type="button" data-emoji="😮" aria-label="Surprised">😮</button><button type="button" data-emoji="🔥" aria-label="Fire">🔥</button></div>
+  </section>
+</main>
+
+<div class="modal-overlay" id="rules-modal" role="dialog" aria-modal="true" aria-labelledby="rules-title">
+  <div class="modal"><button class="modal-close" id="close-rules" type="button" aria-label="Close rules">×</button><h2 id="rules-title">Rules Reference</h2><p class="modal-copy">Claim an action, challenge a claim, and protect your influence. The last player with influence wins.</p><img class="rules-img" src="/rules-reference.jpg" alt="Coup rules reference"></div>
+</div>
+<div class="modal-overlay" id="tutorial-modal" role="dialog" aria-modal="true" aria-labelledby="tutorial-title">
+  <div class="modal"><button class="modal-close" id="close-tutorial" type="button" aria-label="Close tutorial">×</button><h2 id="tutorial-title">How to Play</h2><div id="tutorial-content" aria-live="polite"></div><div class="tutorial-nav"><button class="btn btn-secondary btn-small" id="tutorial-prev" type="button">Previous</button><span class="tutorial-step-count" id="tutorial-step-count"></span><button class="btn btn-primary btn-small" id="tutorial-next" type="button">Next</button></div></div>
+</div>
+<div class="modal-overlay" id="exchange-modal" role="dialog" aria-modal="true" aria-labelledby="exchange-title">
+  <div class="modal"><h2 id="exchange-title">Choose Two Influences</h2><p class="modal-copy">Select exactly two cards to keep.</p><div class="exchange-grid" id="exchange-cards"></div><div class="exchange-actions"><span id="exchange-count" aria-live="polite">0 / 2 selected</span><button class="btn btn-primary" id="confirm-exchange" type="button" disabled>Keep Cards</button></div></div>
+</div>
+<div class="modal-overlay" id="winner-modal" role="dialog" aria-modal="true" aria-labelledby="winner-title">
+  <div class="modal"><h2 id="winner-title">The Court Is Settled</h2><p class="modal-copy" id="winner-message"></p><button class="btn btn-primary" id="rematch" type="button">Rematch</button></div>
+</div>
+<div class="anim-overlay" id="anim-overlay" aria-hidden="true"></div>
+<div class="toast-stack" id="toast-stack" role="status" aria-live="polite"></div>
+<script src="/app.js" defer></script>
+</body>
+</html>

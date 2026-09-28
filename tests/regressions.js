@@ -1,5 +1,19 @@
 const assert=require('assert');
+const fs=require('fs');
+const path=require('path');
 const {createRoom,startGame,finishExchange,autoDiscardExchange,resolveForeignAid,resolveSteal}=require('../server');
+
+const publicDir=path.join(__dirname,'..','public');
+const html=fs.readFileSync(path.join(publicDir,'index.html'),'utf8');
+assert(html.includes('</style>') && html.includes('<body>') && html.includes('</body>') && html.includes('</html>'),'frontend HTML must be a complete document');
+assert(html.includes('class="screen active" id="lobby"'),'frontend must render the lobby before JavaScript connects');
+assert(html.includes('src="/socket.io/socket.io.js"'),'frontend must load the same-origin Socket.IO client');
+assert(html.includes('src="/app.js"'),'frontend must load its game client');
+for (const asset of ['app.js','rules-reference.jpg','cards/ambassador.jpg','cards/assassin.jpg','cards/captain.jpg','cards/contessa.jpg','cards/duke.jpg']) {
+  assert(fs.existsSync(path.join(publicDir,asset)),`missing public asset: ${asset}`);
+}
+const client=fs.readFileSync(path.join(publicDir,'app.js'),'utf8');
+assert(!/localhost|127\.0\.0\.1/i.test(client),'browser client must not hard-code a development host');
 
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
 
@@ -56,5 +70,6 @@ const wait=ms=>new Promise(r=>setTimeout(r,ms));
   assert.strictEqual(st.actionToken,21,'turn token should increment once');
   clearTimeout(st.timer);
 
+  console.log('PASS: Frontend document, same-origin client, and public assets');
   console.log('PASS: Foreign Aid block, Steal double-turn guard, Exchange card preservation');
 })().catch(err=>{ console.error(err); process.exit(1); });
