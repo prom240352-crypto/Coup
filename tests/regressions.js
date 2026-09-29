@@ -47,7 +47,7 @@ assert(client.includes("byId('create-new-room').disabled = true;") && client.inc
 const createNewRoomHandler=client.indexOf('async function createNewRoomFromResult()');
 assert(createNewRoomHandler>=0 && client.indexOf('if (createNewRoomInProgress) return;',createNewRoomHandler)<client.indexOf('await ',createNewRoomHandler),'duplicate-tap guard must run synchronously before any async room operation');
 assert(client.includes("button.id === 'test-sound'") && client.includes('soundEngine?.testSound()'),'Test Sound must call the audio controller directly from its click handler');
-assert(client.includes("socket.on('card_revealed'") && client.includes('INFLUENCE -1') && client.includes('}, 2800);'),'public card reveal should identify the lost influence and clear promptly');
+assert(client.includes("socket.on('card_revealed'") && client.includes('INFLUENCE -1') && client.includes('challenge-proof') && client.includes('CHALLENGE FAILED'),'public card reveal should distinguish proof cards from influence loss');
 assert(client.includes('responsePhase.allowed.includes') && client.includes("response.type === 'PASS'"),'response UI and pass feedback must use the viewer-specific server allowance');
 for (const cue of ['cardCast','challenge','counter','success','failure','loss','elimination','turn','gameStart','gameEnd']) {
   assert(soundApi.patterns[cue],`missing synthesized sound cue: ${cue}`);
@@ -96,6 +96,31 @@ function waitForGameState(client,predicate) {
     };
     client.on('gameState',listener);
   });
+}
+
+async function waitUntil(predicate,message) {
+  const deadline=Date.now()+4000;
+  while(!predicate()) {
+    if(Date.now()>=deadline)throw new Error(message);
+    await wait(10);
+  }
+}
+
+function waitForCardReveal(client,kind) {
+  return new Promise((resolve,reject)=>{
+    const timeout=setTimeout(()=>{client.off('card_revealed',listener);reject(new Error(`card_revealed ${kind} timed out`));},4000);
+    const listener=reveal=>{
+      if(reveal.kind!==kind)return;
+      clearTimeout(timeout);
+      client.off('card_revealed',listener);
+      resolve(reveal);
+    };
+    client.on('card_revealed',listener);
+  });
+}
+
+function inventoryCards(room) {
+  return [...room.players.flatMap(player=>player.cards),...room.deck,...room.discard].sort();
 }
 
 async function connectTestClient(url) {
@@ -536,7 +561,14 @@ function createAppHarness(socket,initialStorage={}) {
     assert.strictEqual(appHarness.elements.get('game').classList.contains('impact-feedback'),false,'impact styling should clean itself up after the short effect');
     assert.strictEqual(appHarness.elements.get('game').dataset.impact,undefined,'impact metadata should not persist after cleanup');
 
-    const responseHost=await connectTestClient(url);
+    const proofRevealState={...revealState,cardReveal:{...revealState.cardReveal,id:`${fresh.code}:proof:1`,kind:'challenge-proof'}};
+    await deliverVisualState(proofRevealState,gameState=>gameState.cardReveal?.id===proofRevealState.cardReveal.id);
+    const proofRevealMarkup=appHarness.elements.get('card-reveal').innerHTML;
+    assert(proofRevealMarkup.includes('Next Player proved the Duke claim') && proofRevealMarkup.includes('ASSASSINATE · CHALLENGE FAILED'),'challenge proof UI should show the proven role and challenge context');
+    assert(!proofRevealMarkup.includes('INFLUENCE -1'),'proving a claim must not be presented as losing influence');
+    assert.strictEqual((proofRevealMarkup.match(/<img\b/g)||[]).length,1,'proof reveal should show only the public claimed card');
+
+    let responseHost=await connectTestClient(url);
     testClients.push(responseHost);
     const responderB=await connectTestClient(url);
     testClients.push(responderB);
@@ -564,6 +596,8 @@ function createAppHarness(socket,initialStorage={}) {
       responseRoom.pendingCounter=null;
       responseRoom.counterResults=[];
       responseRoom.challengeResults=[];
+      responseRoom.deck=[];
+      responseRoom.discard=[];
       responseRoom.cardReveal=null;
       responseRoom.lastLostCard=null;
       responseRoom.lastLostPlayerIndex=null;
@@ -576,8 +610,9 @@ function createAppHarness(socket,initialStorage={}) {
       responseRoom.players[2].cards=['ambassador','contessa'];
       responseRoom.players.forEach(player=>{player.alive=true;});
     };
-    const startResponseAction=async(action,target=null)=>{
+    const startResponseAction=async(action,target=null,configure=()=>{})=>{
       resetResponseRoom();
+      configure(responseRoom);
       if(action==='assassinate')responseRoom.players[0].coins=3;
       if(action==='coup')responseRoom.players[0].coins=10;
       const expectedPhase=['income','coup'].includes(action)?'resolving':'challenging';
@@ -585,6 +620,169 @@ function createAppHarness(socket,initialStorage={}) {
       executeAction(responseRoom,action,target);
       return started;
     };
+
+    const runTaxChallenge=async({actorCards,challengerCards,deck,thirdAlive=true})=>{
+      const responseState=await startResponseAction('tax',null,room=>{
+        room.players[0].cards=actorCards.slice();
+        room.players[1].cards=challengerCards.slice();
+        room.players[2].cards=thirdAlive?['ambassador','contessa']:[];
+        room.players[2].alive=thirdAlive;
+        room.deck=deck.slice();
+        room.discard=[];
+      });
+      assert.deepStrictEqual(responseState.responsePhase.allowed,['CHALLENGE','PASS']);
+      const cardsBefore=inventoryCards(responseRoom);
+      const proofEvents=[responseHost,responderB,responderC].map(client=>waitForCardReveal(client,'challenge-proof'));
+      const finalState=waitForGameState(responseHost,view=>view.state==='finished'||(view.state==='playing'&&view.phase==='selecting'&&view.currentPlayer===1));
+      const originalRandom=Math.random;
+      let resultingState;
+      try {
+        Math.random=()=>0;
+        assert.strictEqual((await emitWithAck(responderB,'actionResponse',{type:'CHALLENGE'})).success,true);
+        resultingState=await finalState;
+      } finally {
+        Math.random=originalRandom;
+      }
+      const [actorProof,challengerProof,observerProof]=await Promise.all(proofEvents);
+      assert.deepStrictEqual(actorProof,challengerProof);
+      assert.deepStrictEqual(actorProof,observerProof);
+      assert.deepStrictEqual(Object.keys(actorProof).sort(),['card','id','kind','playerIndex','playerName','reason']);
+      assert.strictEqual(actorProof.kind,'challenge-proof');
+      assert.strictEqual(actorProof.playerIndex,0);
+      assert.strictEqual(actorProof.card,'duke');
+      assert.strictEqual(actorProof.reason,'tax');
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(actorProof,'replacement'),false,'public proof must not include the replacement');
+      assert.deepStrictEqual(inventoryCards(responseRoom),cardsBefore,'challenge proof/replacement/loss must conserve every card across hands, deck, and discard');
+      return {cardsBefore,actorProof,resultingState};
+    };
+
+    const runOtherRoleProof=async({action,claimedCard,proofPlayerIndex,counterClaim=false})=>{
+      const roleDeck=['assassin','duke','captain'];
+      const actorCards={assassinate:['captain','assassin'],exchange:['captain','ambassador'],steal:['duke','captain']}[action]||['duke','assassin'];
+      const responseState=await startResponseAction(action,action==='assassinate'||action==='steal'?2:null,room=>{
+        room.players[0].cards=actorCards.slice();
+        room.players[1].cards=['captain','duke'];
+        room.players[2].cards=['ambassador','contessa'];
+        room.players[proofPlayerIndex].cards[1]=claimedCard;
+        room.players.forEach(player=>{player.coins=5;player.alive=true;});
+        room.players[1].coins=5;
+        room.players[2].coins=5;
+        room.deck=roleDeck.slice();
+        room.discard=[];
+      });
+      assert(responseState.responsePhase,'the claimed action should open the existing response phase');
+      const cardsBefore=inventoryCards(responseRoom);
+      const proofCardsBefore=responseRoom.players[proofPlayerIndex].cards.slice();
+      const proofEvents=[responseHost,responderB,responderC].map(client=>waitForCardReveal(client,'challenge-proof'));
+      const finalState=waitForGameState(responseHost,view=>view.state==='finished'||(view.state==='playing'&&view.phase==='selecting'&&view.currentPlayer===1));
+      const originalRandom=Math.random;
+      let resultingState;
+      try {
+        Math.random=()=>0;
+        if(counterClaim) {
+          const blocker=[responseHost,responderB,responderC][proofPlayerIndex];
+          const counterPhase=waitForGameState(responseHost,view=>view.responsePhase?.kind==='counter');
+          assert.strictEqual((await emitWithAck(blocker,'actionResponse',{type:'BLOCK',char:claimedCard})).success,true);
+          await counterPhase;
+          assert.strictEqual((await emitWithAck(responseHost,'actionResponse',{type:'CHALLENGE'})).success,true);
+        } else {
+          assert.strictEqual((await emitWithAck(responderB,'actionResponse',{type:'CHALLENGE'})).success,true);
+        }
+        resultingState=await finalState;
+      } finally {
+        Math.random=originalRandom;
+      }
+      const [proofForOwner,proofForChallenger,proofForObserver]=await Promise.all(proofEvents);
+      assert.deepStrictEqual(proofForOwner,proofForChallenger);
+      assert.deepStrictEqual(proofForOwner,proofForObserver);
+      assert.strictEqual(proofForOwner.kind,'challenge-proof');
+      assert.strictEqual(proofForOwner.playerIndex,proofPlayerIndex);
+      assert.strictEqual(proofForOwner.card,claimedCard);
+      const proofPlayer=responseRoom.players[proofPlayerIndex];
+      assert.strictEqual(proofPlayer.cards.length,2,'proof must preserve the challenged player\'s influence count');
+      assert.strictEqual(proofPlayer.cards[0],proofCardsBefore[0],'replacement must occupy the proven card\'s original hand slot');
+      assert.strictEqual(responseRoom.players[counterClaim?0:1].cards.length,1,'the challenger must lose exactly one influence');
+      assert.deepStrictEqual(inventoryCards(responseRoom),cardsBefore,'each proof resolver must conserve cards');
+      assert.strictEqual(getPlayerView(responseRoom,proofPlayer.id).myCards.length,2);
+      const observer=[responseHost,responderB,responderC].find((client,index)=>index!==proofPlayerIndex);
+      assert.strictEqual(getPlayerView(responseRoom,observer.id).players[proofPlayerIndex].cards,null,'opponents must not receive the proven player\'s replacement hand');
+      assert.strictEqual(resultingState.state,'playing');
+      return proofForOwner;
+    };
+
+    const twoInfluenceProof=await runTaxChallenge({actorCards:['captain','duke'],challengerCards:['ambassador','contessa'],deck:['ambassador','assassin','contessa']});
+    assert.strictEqual(responseRoom.players[0].cards.length,2,'a proven 2-influence player must keep both influences');
+    assert.deepStrictEqual(responseRoom.players[0].cards,['captain','ambassador'],'the exact Duke slot should be replaced by a card drawn from the shuffled server deck');
+    assert.strictEqual(responseRoom.players[1].cards.length,1,'the challenger must lose one influence');
+    assert(responseRoom.deck.includes('duke'),'the revealed Duke must return to the deck when a different card is drawn');
+    assert.strictEqual(twoInfluenceProof.actorProof.card,'duke','public proof must reveal the exact claimed role');
+    const ownerAfterProof=getPlayerView(responseRoom,responseHost.id);
+    const opponentAfterProof=getPlayerView(responseRoom,responderC.id);
+    assert.deepStrictEqual(ownerAfterProof.myCards,['captain','ambassador'],'the owner should receive their private replacement in game state');
+    assert.deepStrictEqual(ownerAfterProof.players[0].cards,['captain','ambassador']);
+    assert.strictEqual(opponentAfterProof.players[0].cards,null,'opponents must not receive the replacement hand');
+
+    const originalHostSocketId=responseHost.id;
+    responseHost.disconnect();
+    await waitUntil(()=>responseRoom.players[0].disconnected,'proven player should be marked disconnected before reconnect');
+    const reconnectedHost=await connectTestClient(url);
+    testClients.push(reconnectedHost);
+    const privateReconnectState=waitForGameState(reconnectedHost,view=>view.code===responseCreated.code&&view.myIndex===0&&view.players[0].cards?.includes('ambassador'));
+    assert.strictEqual((await emitWithAck(reconnectedHost,'reconnect',{code:responseCreated.code,name:'Action Host'})).success,true);
+    const restoredPrivateState=await privateReconnectState;
+    assert.notStrictEqual(reconnectedHost.id,originalHostSocketId);
+    assert.deepStrictEqual(restoredPrivateState.myCards,['captain','ambassador'],'reconnect must restore the private replacement card');
+    assert.strictEqual(getPlayerView(responseRoom,responderC.id).players[0].cards,null,'reconnect must not expose the replacement to opponents');
+    responseHost=reconnectedHost;
+
+    await runTaxChallenge({actorCards:['duke'],challengerCards:['captain','contessa'],deck:['assassin','ambassador']});
+    assert.strictEqual(responseRoom.players[0].cards.length,1,'a proven 1-influence player must remain at exactly one influence');
+    assert.strictEqual(responseRoom.players[1].cards.length,1,'challenger still loses one influence against a 1-influence claim');
+    assert.strictEqual(responseRoom.players[0].cards[0],'assassin','the one-card hand should be replaced from the server deck');
+
+    await runTaxChallenge({actorCards:['captain','duke'],challengerCards:['assassin','contessa'],deck:['duke','assassin']});
+    assert.deepStrictEqual(responseRoom.players[0].cards,['captain','duke'],'same-role replacement is allowed when another Duke is legitimately drawn from the deck');
+    assert.strictEqual(responseRoom.players[1].cards.length,1);
+
+    const lastInfluenceProof=await runTaxChallenge({actorCards:['duke'],challengerCards:['captain'],deck:['assassin'],thirdAlive:false});
+    assert.strictEqual(lastInfluenceProof.resultingState.state,'finished','existing game-over behavior should finish when the challenger loses their last influence');
+    assert.strictEqual(responseRoom.winner,responseHost.id);
+    assert.strictEqual(responseRoom.players[0].cards.length,1,'proof replacement must keep the winning player alive with one influence');
+    assert.strictEqual(responseRoom.players[0].alive,true);
+    assert.strictEqual(responseRoom.players[1].cards.length,0);
+    assert.strictEqual(responseRoom.players[1].alive,false);
+
+    await runOtherRoleProof({action:'assassinate',claimedCard:'assassin',proofPlayerIndex:0});
+    await runOtherRoleProof({action:'exchange',claimedCard:'ambassador',proofPlayerIndex:0});
+    await runOtherRoleProof({action:'steal',claimedCard:'captain',proofPlayerIndex:0});
+    await runOtherRoleProof({action:'foreign_aid',claimedCard:'duke',proofPlayerIndex:1,counterClaim:true});
+    await runOtherRoleProof({action:'assassinate',claimedCard:'contessa',proofPlayerIndex:2,counterClaim:true});
+    await runOtherRoleProof({action:'steal',claimedCard:'captain',proofPlayerIndex:2,counterClaim:true});
+
+    let falseChallengeProofCount=0;
+    const falseChallengeProofListener=reveal=>{if(reveal.kind==='challenge-proof')falseChallengeProofCount+=1;};
+    responseHost.on('card_revealed',falseChallengeProofListener);
+    const falseClaimState=await startResponseAction('tax',null,room=>{
+      room.players[0].cards=['captain','assassin'];
+      room.players[1].cards=['ambassador','contessa'];
+      room.players[2].cards=['duke','captain'];
+      room.deck=['duke','assassin'];
+      room.discard=[];
+    });
+    assert.deepStrictEqual(falseClaimState.responsePhase.allowed,['CHALLENGE','PASS']);
+    const falseClaimCardsBefore=inventoryCards(responseRoom);
+    const falseClaimReveal=waitForCardReveal(responseHost,'influence-loss');
+    const falseClaimNextTurn=waitForGameState(responseHost,view=>view.state==='playing'&&view.phase==='selecting'&&view.currentPlayer===1);
+    assert.strictEqual((await emitWithAck(responderB,'actionResponse',{type:'CHALLENGE'})).success,true);
+    await falseClaimNextTurn;
+    const falseClaimLoss=await falseClaimReveal;
+    responseHost.off('card_revealed',falseChallengeProofListener);
+    assert.strictEqual(falseClaimLoss.kind,'influence-loss','an unproven claim should keep the existing influence-loss reveal behavior');
+    assert.strictEqual(falseChallengeProofCount,0,'an unproven claim must not emit a proof reveal');
+    assert.deepStrictEqual(responseRoom.players[0].cards,['captain'],'the player without Duke still loses their influence');
+    assert.deepStrictEqual(responseRoom.players[1].cards,['ambassador','contessa'],'the unsuccessful challenger keeps both influences');
+    assert.strictEqual(responseRoom.players[0].coins,2,'a successfully challenged false Tax claim must not award coins');
+    assert.deepStrictEqual(inventoryCards(responseRoom),falseClaimCardsBefore,'false-claim resolution should still conserve all cards');
 
     let responseState=await startResponseAction('tax');
     assert.deepStrictEqual(responseState.responsePhase.allowed,['CHALLENGE','PASS'],'Tax responders may challenge or pass');
@@ -702,7 +900,8 @@ function createAppHarness(socket,initialStorage={}) {
     assert.deepStrictEqual(revealCounts,[1,1,1],'each connected player must receive exactly one card reveal event');
     assert(revealPayloads.every(reveal=>reveal.card===removedCard),'the reveal must match the exact card removed from the hand');
     assert(revealPayloads.every(reveal=>reveal.playerIndex===1&&reveal.playerName==='B'),'the reveal must identify the player who lost influence');
-    assert.deepStrictEqual(Object.keys(revealPayloads[0]).sort(),['card','id','playerIndex','playerName','reason'],'public reveal payload must contain only intended public fields');
+    assert.deepStrictEqual(Object.keys(revealPayloads[0]).sort(),['card','id','kind','playerIndex','playerName','reason'],'public reveal payload must contain only intended public fields');
+    assert.strictEqual(revealPayloads[0].kind,'influence-loss');
     assert.strictEqual(responseRoom.players[1].cards.length,1,'the other influence must remain in the player hand');
     assert(!JSON.stringify(revealPayloads[0]).includes('captain'),'the remaining hidden card must not be included in reveal data');
     const publicRevealView=getPlayerView(responseRoom,responseHost.id);

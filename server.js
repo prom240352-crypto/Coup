@@ -249,7 +249,8 @@ function getPlayerView(room, playerId) {
       playerIndex: room.cardReveal.playerIndex,
       playerName: room.cardReveal.playerName,
       card: room.cardReveal.card,
-      reason: room.cardReveal.reason
+      reason: room.cardReveal.reason,
+      kind: room.cardReveal.kind
     } : null
   };
   return view;
@@ -517,6 +518,7 @@ function resolveForeignAid(room) {
         const hasDuke = blocker.cards.includes('duke');
         if (hasDuke) {
           room.log.push({ type: 'challenge', message: `${blocker.name} has Duke - block challenge fails!` });
+          replaceProvenInfluence(room, counter.playerIndex, 'duke');
           loseInfluence(room, counterChallenge.playerIndex);
           if (!checkWinner(room)) nextTurn(room);
           else broadcastRoom(room);
@@ -552,6 +554,7 @@ function resolveTax(room) {
       room.log.push({ type: 'challenge', message: `${challenger.name} challenges!` });
       if (hasDuke) {
         room.log.push({ type: 'challenge', message: `${player.name} has Duke - challenge fails!` });
+        replaceProvenInfluence(room, room.currentPlayer, 'duke');
         loseInfluence(room, challenge.playerIndex);
       } else {
         room.log.push({ type: 'challenge', message: `${player.name} doesn't have Duke - challenge succeeds!` });
@@ -579,6 +582,7 @@ function resolveAssassinate(room) {
         const targetHasContessa = target.cards.includes('contessa');
         if (targetHasContessa) {
           room.log.push({ type: 'challenge', message: `${target.name} has Contessa - challenge fails!` });
+          replaceProvenInfluence(room, room.selectedTarget, 'contessa');
           loseInfluence(room, counterChallenge.playerIndex);
         } else {
           room.log.push({ type: 'challenge', message: `${target.name} doesn't have Contessa - challenge succeeds!` });
@@ -599,6 +603,7 @@ function resolveAssassinate(room) {
       room.log.push({ type: 'challenge', message: `${room.players[challenge.playerIndex].name} challenges!` });
       if (hasAssassin) {
         room.log.push({ type: 'challenge', message: `${player.name} has Assassin - challenge fails!` });
+        replaceProvenInfluence(room, room.currentPlayer, 'assassin');
         loseInfluence(room, challenge.playerIndex);
       } else {
         room.log.push({ type: 'challenge', message: `${player.name} doesn't have Assassin - challenge succeeds!` });
@@ -622,6 +627,7 @@ function resolveExchange(room) {
       room.log.push({ type: 'challenge', message: `${room.players[challenge.playerIndex].name} challenges!` });
       if (hasAmbassador) {
         room.log.push({ type: 'challenge', message: `${player.name} has Ambassador - challenge fails!` });
+        replaceProvenInfluence(room, room.currentPlayer, 'ambassador');
         loseInfluence(room, challenge.playerIndex);
       } else {
         room.log.push({ type: 'challenge', message: `${player.name} doesn't have Ambassador - challenge succeeds!` });
@@ -717,6 +723,7 @@ function resolveSteal(room) {
         const targetHasCard = target.cards.includes(counter.char);
         if (targetHasCard) {
           room.log.push({ type: 'challenge', message: `${target.name} has ${CHARACTERS[counter.char].name} - challenge fails!` });
+          replaceProvenInfluence(room, room.selectedTarget, counter.char);
           loseInfluence(room, challenge.playerIndex);
         } else {
           room.log.push({ type: 'challenge', message: `${target.name} doesn't have ${CHARACTERS[counter.char].name} - challenge succeeds!` });
@@ -737,6 +744,7 @@ function resolveSteal(room) {
       room.log.push({ type: 'challenge', message: `${room.players[challenge.playerIndex].name} challenges!` });
       if (hasCaptain) {
         room.log.push({ type: 'challenge', message: `${player.name} has Captain - challenge fails!` });
+        replaceProvenInfluence(room, room.currentPlayer, 'captain');
         loseInfluence(room, challenge.playerIndex);
       } else {
         room.log.push({ type: 'challenge', message: `${player.name} doesn't have Captain - challenge succeeds!` });
@@ -782,6 +790,7 @@ function resolveChallenge(room) {
     if (hasCard) {
       // Action player wins - challenger loses influence
       room.log.push({ type: 'challenge', message: `${player.name} has ${CHARACTERS[requiredCard].name} - challenge fails!` });
+      replaceProvenInfluence(room, room.currentPlayer, requiredCard);
       loseInfluence(room, challenge.playerIndex);
       
       // Action player must put the card back and draw a new one (optional rule)
@@ -836,20 +845,52 @@ function loseInfluence(room, playerIndex) {
     // Store for card reveal animation
     room.lastLostCard = lost;
     room.lastLostPlayerIndex = playerIndex;
-    const reveal = {
-      id: `${room.code}:${++room.cardRevealSequence}`,
-      playerIndex,
-      playerName: player.name,
-      card: lost,
-      reason: room.selectedAction || null
-    };
-    room.cardReveal = reveal;
-    io.to(room.code).emit('card_revealed', reveal);
+    publishCardReveal(room, playerIndex, lost, 'influence-loss');
     room.log.push({ type: 'system', message: `${player.name} loses ${CHARACTERS[lost].name}` });
     if (player.cards.length === 0) {
       player.alive = false;
     }
   }
+}
+
+function publishCardReveal(room, playerIndex, card, kind) {
+  const player = room.players[playerIndex];
+  const reveal = {
+    id: `${room.code}:${++room.cardRevealSequence}`,
+    playerIndex,
+    playerName: player.name,
+    card,
+    reason: room.selectedAction || null,
+    kind
+  };
+  room.cardReveal = reveal;
+  io.to(room.code).emit('card_revealed', reveal);
+  return reveal;
+}
+
+function replaceProvenInfluence(room, playerIndex, claimedCard) {
+  const player = room.players[playerIndex];
+  if (!player) return false;
+  const cardIndex = player.cards.indexOf(claimedCard);
+  if (cardIndex < 0) return false;
+
+  const [provenCard] = player.cards.splice(cardIndex, 1);
+  room.deck.push(provenCard);
+  for (let i = room.deck.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [room.deck[i], room.deck[j]] = [room.deck[j], room.deck[i]];
+  }
+  const replacement = room.deck.pop();
+  if (replacement === undefined) {
+    room.deck.push(provenCard);
+    player.cards.splice(cardIndex, 0, provenCard);
+    return false;
+  }
+
+  player.cards.splice(cardIndex, 0, replacement);
+  publishCardReveal(room, playerIndex, provenCard, 'challenge-proof');
+  room.log.push({ type: 'challenge', message: `${player.name} reveals ${CHARACTERS[provenCard].name} to prove the claim!` });
+  return true;
 }
 
 // ============ SOCKET HANDLERS ============

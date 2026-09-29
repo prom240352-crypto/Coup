@@ -553,9 +553,12 @@
     }
     if (reveal.id === displayedCardRevealId) return;
     displayedCardRevealId = reveal.id;
+    const isChallengeProof = reveal.kind === 'challenge-proof';
     triggerImpact(reveal.reason === 'coup' ? 'coup' : 'loss');
     const character = characterNames[reveal.card] || reveal.card;
-    banner.innerHTML = `<span class="card-reveal-copy"><span>${escapeHtml(reveal.playerName)} lost Influence</span><strong>${escapeHtml(character)}</strong><small>INFLUENCE -1</small></span><img class="revealed-card-image" src="/cards/${encodeURIComponent(reveal.card)}.jpg" alt="${escapeHtml(character)} revealed">`;
+    const message = isChallengeProof ? `${reveal.playerName} proved the ${character} claim` : `${reveal.playerName} lost Influence`;
+    const detail = isChallengeProof ? `${actionLabel(reveal.reason).toUpperCase()} · CHALLENGE FAILED` : 'INFLUENCE -1';
+    banner.innerHTML = `<span class="card-reveal-copy"><span>${escapeHtml(message)}</span><strong>${escapeHtml(character)}</strong><small>${escapeHtml(detail)}</small></span><img class="revealed-card-image" src="/cards/${encodeURIComponent(reveal.card)}.jpg" alt="${escapeHtml(character)} revealed">`;
     banner.hidden = false;
     if (cardRevealTimer) window.clearTimeout(cardRevealTimer);
     cardRevealTimer = window.setTimeout(() => {
