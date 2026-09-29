@@ -109,6 +109,24 @@ function leaveFinishedRoom(room, playerId) {
   return { success: true, code: room.code, remainingPlayers: room.players.length };
 }
 
+function cancelWaitingRoom(room, playerId) {
+  if (!room || room.state !== 'lobby') return { error: 'You can only cancel a room while waiting for players.' };
+  const playerIndex = room.players.findIndex(player => player.id === playerId);
+  if (playerIndex < 0) return { error: 'Player is not in this room.' };
+
+  const [player] = room.players.splice(playerIndex, 1);
+  if (player.disconnectTimer) clearTimeout(player.disconnectTimer);
+  const disconnectTimer = room.disconnectTimers.get(player.name);
+  if (disconnectTimer === player.disconnectTimer) room.disconnectTimers.delete(player.name);
+
+  if (room.players.length === 0) {
+    if (room.timer) clearTimeout(room.timer);
+    if (room.counterChallengeTimer) clearTimeout(room.counterChallengeTimer);
+    rooms.delete(room.code);
+  }
+  return { success: true, code: room.code, remainingPlayers: room.players.length };
+}
+
 function startGame(room) {
   const playerCount = room.players.length;
   room.deck = createDeck(playerCount);
@@ -964,6 +982,16 @@ io.on('connection', (socket) => {
     callback?.(result);
   });
 
+  socket.on('cancelWaitingRoom', (payload = {}, callback) => {
+    const room = payload.code ? findRoomByCode(payload.code) : findRoom(socket.id);
+    if (!room) return callback?.({ success: true });
+    const result = cancelWaitingRoom(room, socket.id);
+    if (result.error) return callback?.(result);
+    socket.leave(room.code);
+    if (result.remainingPlayers > 0) broadcastRoom(room);
+    callback?.(result);
+  });
+
   // Rematch request
   socket.on('rematch', () => {
     const room = findRoom(socket.id);
@@ -1052,7 +1080,7 @@ if (require.main === module) {
 }
 
 module.exports = {
-  app, server, io, rooms, CHARACTERS, createDeck, createRoom, leaveFinishedRoom, startGame, executeAction,
+  app, server, io, rooms, CHARACTERS, createDeck, createRoom, leaveFinishedRoom, cancelWaitingRoom, startGame, executeAction,
   resolveForeignAid, resolveSteal, resolveExchange, finishExchange, autoDiscardExchange,
   loseInfluence, getPlayerView, nextTurn, checkWinner, findRoomByCode
 };

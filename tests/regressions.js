@@ -4,7 +4,7 @@ const path=require('path');
 const vm=require('vm');
 const soundApi=require('../public/sound');
 const socketClient=require('socket.io-client').io;
-const {server,io,rooms,createRoom,leaveFinishedRoom,startGame,executeAction,finishExchange,autoDiscardExchange,resolveForeignAid,resolveSteal,loseInfluence,getPlayerView,checkWinner}=require('../server');
+const {server,io,rooms,createRoom,leaveFinishedRoom,cancelWaitingRoom,startGame,executeAction,finishExchange,autoDiscardExchange,resolveForeignAid,resolveSteal,loseInfluence,getPlayerView,checkWinner}=require('../server');
 
 const publicDir=path.join(__dirname,'..','public');
 const html=fs.readFileSync(path.join(publicDir,'index.html'),'utf8');
@@ -27,7 +27,14 @@ assert(client.includes("socket.on('card_revealed'") && client.includes("showCard
 assert(!/localhost|127\.0\.0\.1/i.test(client),'browser client must not hard-code a development host');
 assert(client.includes("if (button.id === 'rematch')") && client.includes("socket?.emit('rematch')"),'Rematch must keep using its existing same-room event');
 assert(client.includes("button.id === 'create-new-room'") && client.includes("emitWithAck('leaveRoom', pendingLeaveRoom)"),'Create New Room must leave the finished room');
-assert(client.includes("button.id === 'confirm-create-room'") && client.includes("button.id === 'cancel-create-room'"),'room setup must require explicit confirmation and support cancellation');
+assert(client.includes("button.id === 'confirm-create-room'") && client.includes("button.id === 'cancel-waiting'"),'room setup must confirm creation and waiting screen must own cancellation');
+const setupMarkup=html.slice(html.indexOf('<section class="screen" id="create-room-screen"'),html.indexOf('<section class="screen" id="waiting"'));
+const waitingMarkup=html.slice(html.indexOf('<section class="screen" id="waiting"'),html.indexOf('<section class="screen" id="game"'));
+assert(!setupMarkup.includes('Cancel') && !setupMarkup.includes('cancel-create-room'),'room setup must not contain a Cancel control');
+assert(waitingMarkup.indexOf('id="waiting-players"')<waitingMarkup.indexOf('id="cancel-waiting"'),'waiting Cancel must sit below the player list');
+assert(waitingMarkup.indexOf('id="cancel-waiting"')<waitingMarkup.indexOf('id="start-game"'),'waiting Cancel must remain separate from the room code and player list');
+assert.strictEqual((html.match(/id="cancel-waiting"/g)||[]).length,1,'Cancel must appear only on the waiting screen');
+assert(html.includes('.waiting-cancel{min-height:52px}') && html.includes('#waiting{justify-content:flex-start;gap:10px;overflow-y:auto'),'waiting controls must remain reachable on small viewports');
 assert(client.includes('clearSavedRoom();') && client.includes("setScreen('lobby')"),'Create New Room must clear reconnect state and return to the lobby');
 assert(!client.includes('finishPendingNewRoom') && !client.includes("emitWithAck('reconnect', oldRoom)"),'leaving a finished room must not reconnect it or create a new room automatically');
 assert(client.includes('if (createNewRoomInProgress) return;'),'Create New Room click handler must ignore duplicate taps');
@@ -277,6 +284,8 @@ function createAppHarness(socket,initialStorage={}) {
   protectedRoom.state='playing';
   assert.match(leaveFinishedRoom(protectedRoom,'protected').error,/finished room/);
   assert.strictEqual(rooms.get(protectedRoom.code),protectedRoom,'a rejected active-game leave must not delete its room');
+  assert.match(cancelWaitingRoom(protectedRoom,'protected').error,/while waiting/,'waiting cancellation must be rejected once gameplay has started');
+  assert.strictEqual(rooms.get(protectedRoom.code),protectedRoom,'waiting cancellation must not delete an active game');
   const emptyRoom=createRoom('alone','Alone');
   emptyRoom.state='finished';
   assert.strictEqual(leaveFinishedRoom(emptyRoom,'alone').success,true);
@@ -346,13 +355,19 @@ function createAppHarness(socket,initialStorage={}) {
 
     let leaveEmits=0;
     let createEmits=0;
+    let cancelEmits=0;
     let oldStorageClearedBeforeLeave=false;
+    let reconnectStorageClearedBeforeCancel=false;
     host.onAnyOutgoing(event=>{
       if (event==='leaveRoom') {
         leaveEmits+=1;
         oldStorageClearedBeforeLeave=appHarness.storage.get('coup-last-room')===undefined;
       }
       if (event==='createRoom') createEmits+=1;
+      if (event==='cancelWaitingRoom') {
+        cancelEmits+=1;
+        reconnectStorageClearedBeforeCancel=appHarness.storage.get('coup-last-room')===undefined;
+      }
     });
     const firstTap=appHarness.click('create-new-room');
     assert.strictEqual(appHarness.elements.get('lobby').classList.contains('active'),true,'result action should immediately return the player to the lobby screen');
@@ -371,20 +386,66 @@ function createAppHarness(socket,initialStorage={}) {
     appHarness.click('create-room');
     assert.strictEqual(appHarness.elements.get('create-room-screen').classList.contains('active'),true,'Create Room should open setup without creating a room');
     appHarness.elements.get('create-room-name').value='Discarded Name';
-    appHarness.click('cancel-create-room');
-    assert.strictEqual(appHarness.elements.get('lobby').classList.contains('active'),true,'Cancel should return to the lobby');
-    assert.strictEqual(createEmits,0,'Cancel must not create a partially initialized room');
+    assert.strictEqual(appHarness.elements.has('cancel-create-room'),false,'room setup must not expose a Cancel control');
+    const cancelledRoomUpdate=waitForGameState(host,gameState=>gameState.state==='lobby' && gameState.code!==oldCode);
+    await appHarness.click('confirm-create-room');
+    const cancelledState=await cancelledRoomUpdate;
+    assert.strictEqual(createEmits,1,'explicit confirmation should create exactly one room');
+    assert.strictEqual(appHarness.elements.get('waiting').classList.contains('active'),true,'confirmed room should render the waiting lobby');
+    assert.strictEqual(cancelledState.players[0].name,'Discarded Name','room creation must use the setup name');
+    const cancelledCode=cancelledState.code;
+    testRoomCodes.push(cancelledCode);
+    const emptyCancelledRoom=rooms.get(cancelledCode);
+    assert(emptyCancelledRoom,'newly created waiting room should exist before cancellation');
+    await appHarness.click('cancel-waiting');
+    assert.strictEqual(cancelEmits,1,'waiting Cancel must send one server cancellation');
+    assert(reconnectStorageClearedBeforeCancel,'waiting Cancel must clear saved reconnect state before leaving');
+    assert.strictEqual(rooms.has(cancelledCode),false,'cancelling the only player must delete the now-empty room');
+    assert.strictEqual(appHarness.storage.has('coup-last-room'),false,'waiting Cancel must clear saved room state');
+    assert.strictEqual(appHarness.elements.get('lobby').classList.contains('active'),true,'waiting Cancel must return to the lobby');
+    assert.strictEqual(appHarness.elements.get('waiting').classList.contains('active'),false,'the cancelled room must no longer be shown');
+    assert.strictEqual(appHarness.elements.get('player-name').value,'','waiting Cancel must clear the previous player name');
+    assert.strictEqual(createEmits,1,'cancelling a waiting room must not create another room');
+
+    const cancelGuest=await connectTestClient(url);
+    testClients.push(cancelGuest);
+    appHarness.click('create-room');
+    appHarness.elements.get('create-room-name').value='Waiting Host';
+    const sharedCancelRoomUpdate=waitForGameState(host,gameState=>gameState.state==='lobby' && gameState.code!==oldCode && gameState.code!==cancelledCode);
+    await appHarness.click('confirm-create-room');
+    const sharedCancelState=await sharedCancelRoomUpdate;
+    const sharedCancelCode=sharedCancelState.code;
+    testRoomCodes.push(sharedCancelCode);
+    const sharedCancelRoom=rooms.get(sharedCancelCode);
+    const guestJoinedCancelRoom=waitForGameState(host,gameState=>gameState.code===sharedCancelCode && gameState.players.length===2);
+    assert.strictEqual((await emitWithAck(cancelGuest,'joinRoom',{code:sharedCancelCode,name:'Cancel Guest'})).success,true);
+    await guestJoinedCancelRoom;
+    const remainingGuestState=waitForGameState(cancelGuest,gameState=>gameState.code===sharedCancelCode && gameState.players.length===1 && gameState.myIndex===0);
+    await appHarness.click('cancel-waiting');
+    const guestAfterHostCancel=await remainingGuestState;
+    assert.strictEqual(cancelEmits,2,'each waiting cancellation must send exactly one server request');
+    assert.strictEqual(sharedCancelRoom.players.length,1,'cancelling the host must remove only that player');
+    assert.strictEqual(sharedCancelRoom.players[0].id,cancelGuest.id,'the other player must remain in the room');
+    assert.strictEqual(guestAfterHostCancel.players[0].isMe,true,'remaining player must receive the updated host/player index');
+    assert.strictEqual(Array.from(rooms.values()).some(room=>room.players.some(player=>player.id===host.id)),false,'cancelled host must not remain as a ghost player');
+    host.emit('startGame');
+    host.emit('selectAction',{action:'income'});
+    await wait(20);
+    assert.strictEqual(sharedCancelRoom.state,'lobby','stale actions from the cancelled client must not affect the old room');
+    assert.strictEqual(sharedCancelRoom.players.length,1,'stale actions must not restore the cancelled player');
+    assert.strictEqual((await emitWithAck(cancelGuest,'cancelWaitingRoom',{code:sharedCancelCode})).success,true,'the remaining player should also be able to cancel the now-empty waiting room');
+    assert.strictEqual(rooms.has(sharedCancelCode),false,'the last waiting player cancelling must delete the room');
+
     appHarness.elements.get('player-name').value='Lobby Renamed';
     appHarness.click('create-room');
     assert.strictEqual(appHarness.elements.get('create-room-name').value,'Lobby Renamed','room setup should use the latest lobby name');
-    const freshLobbyUpdate=waitForGameState(host,gameState=>gameState.state==='lobby' && gameState.code!==oldCode);
+    const freshLobbyUpdate=waitForGameState(host,gameState=>gameState.state==='lobby' && gameState.code!==oldCode && gameState.code!==cancelledCode && gameState.code!==sharedCancelCode);
     await appHarness.click('confirm-create-room');
     const freshState=await freshLobbyUpdate;
-    assert.strictEqual(createEmits,1,'explicit confirmation should create exactly one room');
-    assert.strictEqual(appHarness.elements.get('waiting').classList.contains('active'),true,'confirmed room should render the waiting lobby');
+    assert.strictEqual(createEmits,3,'a new room should only be created after explicit confirmation');
     const fresh=JSON.parse(appHarness.storage.get('coup-last-room'));
-    assert(fresh.code && fresh.code!==oldCode,'explicit room creation must generate a genuinely new room ID');
-    assert.strictEqual(rooms.get(fresh.code).players[0].name,'Lobby Renamed','Create Room must use the edited lobby name');
+    assert(fresh.code && fresh.code!==oldCode && fresh.code!==cancelledCode && fresh.code!==sharedCancelCode,'recreating after cancellation must use a new room ID');
+    assert.strictEqual(rooms.get(fresh.code).players[0].name,'Lobby Renamed','Create Room must use the newly entered name');
 
     assert.strictEqual(rooms.get(oldCode),oldRoom,'leaving must not delete a room still used by another player');
     assert.deepStrictEqual(oldRoom.players.map(player=>player.id),[guest.id],'leaving must remove only the requesting player');

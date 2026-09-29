@@ -41,6 +41,7 @@
   let previousAudioLog = [];
   let audioLogSequence = 0;
   let leaveRequestInProgress = false;
+  let cancelWaitingInProgress = false;
 
   const byId = id => document.getElementById(id);
   const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -264,6 +265,10 @@
   }
 
   async function createRoom(nameOverride) {
+    if (cancelWaitingInProgress) {
+      setStatus('Leaving the previous room. Please wait.');
+      return { error: 'Leaving the previous room.' };
+    }
     if (createNewRoomInProgress) {
       setStatus('Leaving the previous room. Please wait.');
       return { error: 'Leaving the previous room.' };
@@ -352,10 +357,32 @@
     setScreen('create-room-screen');
   }
 
-  function cancelCreateRoom() {
-    byId('player-name').value = byId('create-room-name').value;
+  async function cancelWaitingRoom() {
+    if (state?.state !== 'lobby' || !state.code || cancelWaitingInProgress) return;
+    if (!socket?.connected) {
+      setStatus('Connection lost. Reconnect before leaving the room.', 'waiting-status');
+      return;
+    }
+
+    cancelWaitingInProgress = true;
+    const code = state.code;
+    byId('cancel-waiting').disabled = true;
+    clearSavedRoom();
+    pendingTargetAction = null;
+    selectedExchange.clear();
+    exchangeSignature = '';
+    state = null;
+    byId('player-name').value = '';
+    byId('create-room-name').value = '';
+    byId('room-code-input').value = '';
     byId('create-room-status').textContent = '';
     setScreen('lobby');
+    setStatus('You left the room. Create or join a room.');
+
+    const response = await emitWithAck('cancelWaitingRoom', { code });
+    cancelWaitingInProgress = false;
+    byId('cancel-waiting').disabled = false;
+    if (response.error) setStatus(response.error);
   }
 
   async function joinRoom() {
@@ -606,7 +633,7 @@
 
     if (button.id === 'create-room') return openCreateRoomScreen();
     if (button.id === 'confirm-create-room') return createRoom(byId('create-room-name').value);
-    if (button.id === 'cancel-create-room') return cancelCreateRoom();
+    if (button.id === 'cancel-waiting') return cancelWaitingRoom();
     if (button.id === 'join-room') return joinRoom();
     if (button.id === 'start-game') return socket?.emit('startGame');
     if (button.id === 'copy-room-code') {

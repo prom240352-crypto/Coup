@@ -47,6 +47,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;background:radial-gradi
 #waiting{gap:20px}
 .waiting-code{font-family:'Orbitron',sans-serif;font-size:22px;color:var(--gold);letter-spacing:6px}
 .player-list{display:flex;flex-direction:column;gap:6px;width:min(380px,90vw)}
+.player-list{max-height:min(36dvh,300px);overflow-y:auto;overscroll-behavior:contain}
+.waiting-cancel{min-height:52px}
 .player-slot{display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--panel);border:1px solid var(--border);border-radius:8px}
 .player-slot.filled{border-color:var(--crimson)}
 .player-slot.empty{opacity:0.4;border-style:dashed}
@@ -239,9 +241,14 @@ body::before{content:'';position:fixed;inset:0;z-index:0;background:radial-gradi
 .winner-actions .btn{width:100%;min-height:46px;white-space:normal}
 @media(max-width:600px){
   .screen{padding:14px}
-  #lobby,#waiting{gap:16px}
+  #lobby{gap:16px}
+  #waiting{justify-content:flex-start;gap:10px;overflow-y:auto;padding-top:max(10px,env(safe-area-inset-top));padding-bottom:max(10px,env(safe-area-inset-bottom))}
   .lobby-title{font-size:clamp(40px,14vw,62px);letter-spacing:8px}
   .lobby-box{padding:22px;width:min(400px,94vw)}
+  #waiting .lobby-box{gap:10px;padding:14px 18px}
+  #waiting .player-list{gap:4px;max-height:min(34dvh,240px)}
+  #waiting .player-slot{padding:6px 10px}
+  #waiting .player-avatar{width:28px;height:28px}
   #game{padding:0}
   .oval-table{width:96vw;height:min(60vh,460px);border-width:6px}
   .game-hud{padding:8px 10px}
@@ -307,7 +314,6 @@ body::before{content:'';position:fixed;inset:0;z-index:0;background:radial-gradi
         <input id="create-room-name" name="create-room-name" maxlength="18" autocomplete="nickname" placeholder="Choose a name">
       </div>
       <button class="btn btn-primary" id="confirm-create-room" type="button">Create Room</button>
-      <button class="btn btn-secondary" id="cancel-create-room" type="button">Cancel</button>
       <p class="lobby-status" id="create-room-status" role="status" aria-live="polite"></p>
     </div>
   </section>
@@ -319,6 +325,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;background:radial-gradi
       <h2>Room Code</h2>
       <button class="waiting-code btn btn-secondary" id="copy-room-code" type="button" aria-label="Copy room code">-----</button>
       <div class="player-list" id="waiting-players" aria-live="polite"></div>
+      <button class="btn btn-secondary waiting-cancel" id="cancel-waiting" type="button">Cancel</button>
       <button class="btn btn-primary" id="start-game" type="button" disabled>Start Game</button>
       <p class="lobby-status" id="waiting-status" role="status" aria-live="polite"></p>
     </div>
