@@ -29,16 +29,18 @@
   const storageKey = 'coup-last-room';
   let state = null;
   let pendingTargetAction = null;
-  let pendingNewRoomName = null;
   let pendingLeaveRoom = null;
   let createNewRoomInProgress = false;
   let selectedExchange = new Set();
   let exchangeSignature = '';
+  let displayedCardRevealId = null;
+  let cardRevealTimer = null;
   let toastTimeout;
   let tutorialIndex = 0;
   let previousAudioSnapshot = null;
   let previousAudioLog = [];
   let audioLogSequence = 0;
+  let leaveRequestInProgress = false;
 
   const byId = id => document.getElementById(id);
   const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -262,17 +264,24 @@
   }
 
   async function createRoom(nameOverride) {
+    if (createNewRoomInProgress) {
+      setStatus('Leaving the previous room. Please wait.');
+      return { error: 'Leaving the previous room.' };
+    }
     const name = (nameOverride || byId('player-name').value).trim();
     if (!name) {
-      setStatus('Enter your name first.');
+      setStatus('Enter your name first.', 'create-room-status');
       return { error: 'Enter your name first.' };
     }
-    setStatus('Creating room...');
+    setStatus('Creating room...', 'create-room-status');
+    byId('confirm-create-room').disabled = true;
     const response = await emitWithAck('createRoom', { name });
+    byId('confirm-create-room').disabled = false;
     if (response.error) {
-      setStatus(response.error);
+      setStatus(response.error, 'create-room-status');
       return response;
     }
+    byId('player-name').value = name;
     saveRoom(response.code, name);
     setStatus(`Room ${response.code} created.`, 'waiting-status');
     byId('room-code-input').value = response.code;
@@ -281,28 +290,25 @@
 
   function unlockCreateNewRoomButton(message) {
     createNewRoomInProgress = false;
-    pendingNewRoomName = null;
     pendingLeaveRoom = null;
     byId('create-new-room').disabled = false;
     if (message) setStatus(message);
   }
 
-  async function finishPendingNewRoom() {
-    if (!createNewRoomInProgress || !pendingNewRoomName || !socket?.connected) return;
-    const name = pendingNewRoomName;
-    pendingNewRoomName = null;
-    const response = await createRoom(name);
-    if (response?.error) {
-      if (!socket.connected) {
-        pendingNewRoomName = name;
-        setStatus('Connection lost. Reconnecting before creating your room...');
-        socket.connect();
-        return;
-      }
-      return unlockCreateNewRoomButton(response.error);
+  async function finishPendingRoomLeave() {
+    if (!pendingLeaveRoom || !socket?.connected || leaveRequestInProgress) return;
+    leaveRequestInProgress = true;
+    const response = await emitWithAck('leaveRoom', pendingLeaveRoom);
+    leaveRequestInProgress = false;
+    if (response.error && !socket.connected) {
+      setStatus('Connection lost. Reconnecting to leave the finished room...');
+      socket.connect();
+      return;
     }
+    pendingLeaveRoom = null;
     createNewRoomInProgress = false;
     byId('create-new-room').disabled = false;
+    setStatus(response.error || 'You left the finished room. Create or join a room.');
   }
 
   async function createNewRoomFromResult() {
@@ -312,38 +318,44 @@
 
     const saved = readSavedRoom();
     const currentPlayer = state?.players?.[state.myIndex];
-    const name = saved?.name || currentPlayer?.name || byId('player-name').value.trim() || 'Player';
+    const name = currentPlayer?.name || saved?.name || byId('player-name').value.trim() || 'Player';
     const oldCode = state?.code || saved?.code || null;
     clearSavedRoom();
     byId('player-name').value = name;
+    byId('create-room-name').value = name;
     byId('winner-modal').classList.remove('active');
-    pendingNewRoomName = name;
     pendingLeaveRoom = oldCode ? { code: oldCode, name } : null;
     pendingTargetAction = null;
     state = null;
     previousAudioSnapshot = null;
     previousAudioLog = [];
     setScreen('lobby');
-    setStatus('Leaving the finished room and creating a new room...');
+    setStatus('You are back in the lobby. Create or join a room.');
 
+    if (!pendingLeaveRoom) {
+      createNewRoomInProgress = false;
+      byId('create-new-room').disabled = false;
+      return;
+    }
     if (!socket) return unlockCreateNewRoomButton('The game server is unavailable. You are back at the lobby.');
     if (!socket.connected) {
-      setStatus('Reconnecting to leave the previous room and create a new one...');
+      setStatus('Reconnecting only to leave the finished room...');
       socket.connect();
       return;
     }
+    await finishPendingRoomLeave();
+  }
 
-    if (pendingLeaveRoom) {
-      const result = await emitWithAck('leaveRoom', { code: oldCode });
-      if (result.error && socket.connected) return unlockCreateNewRoomButton(result.error);
-      if (!socket.connected) {
-        setStatus('Reconnecting to leave the previous room and create a new one...');
-        socket.connect();
-        return;
-      }
-      pendingLeaveRoom = null;
-    }
-    await finishPendingNewRoom();
+  function openCreateRoomScreen() {
+    byId('create-room-name').value = byId('player-name').value;
+    byId('create-room-status').textContent = '';
+    setScreen('create-room-screen');
+  }
+
+  function cancelCreateRoom() {
+    byId('player-name').value = byId('create-room-name').value;
+    byId('create-room-status').textContent = '';
+    setScreen('lobby');
   }
 
   async function joinRoom() {
@@ -444,27 +456,26 @@
       return;
     }
 
-    const me = state.players[state.myIndex];
     const current = state.players[state.currentPlayer];
-    const selectedAction = state.selectedAction;
-    const isActionPlayer = state.myIndex === state.currentPlayer;
-    const isTarget = state.selectedTarget === state.myIndex;
-    const challengeable = !['foreign_aid', 'income', 'coup'].includes(selectedAction);
-    const allowedCounter = selectedAction === 'foreign_aid' ? ['duke'] : selectedAction === 'assassinate' && isTarget ? ['contessa'] : selectedAction === 'steal' && isTarget ? ['captain', 'ambassador'] : [];
-    const hasCounter = lastActionHasCounter();
+    const responsePhase = state.responsePhase || { allowed: [], blockCharacters: [], responders: [] };
     const options = [];
 
-    if (state.counterChallengePhase && isActionPlayer && state.pendingCounter) {
-      options.push(`<button class="challenge-option" type="button" data-counter-challenge><span class="challenge-option-title">Challenge the counterclaim</span><span class="challenge-option-desc">${escapeHtml(current.name)} claimed ${characterNames[state.pendingCounter.char] || 'a role'}.</span></button>`);
-    } else if (!isActionPlayer) {
-      if (challengeable) options.push(`<button class="challenge-option" type="button" data-challenge><span class="challenge-option-title">Challenge ${escapeHtml(current.name)}</span><span class="challenge-option-desc">Contest the claim of ${actionLabel(selectedAction)}.</span></button>`);
-      if (allowedCounter.length && !hasCounter && !state.counterChallengePhase) {
-        options.push(...allowedCounter.map(character => `<button class="challenge-option" type="button" data-counter="${character}"><span class="challenge-option-title">Block with ${characterNames[character]}</span><span class="challenge-option-desc">Claim ${characterNames[character]} to block.</span></button>`));
-      }
+    if (responsePhase.allowed.includes('CHALLENGE')) {
+      const label = responsePhase.kind === 'counter' ? 'Challenge the block' : `Challenge ${current?.name || 'the claim'}`;
+      options.push(`<button class="challenge-option" type="button" data-response="CHALLENGE"><span class="challenge-option-title">Challenge</span><span class="challenge-option-desc">${escapeHtml(label)}.</span></button>`);
+    }
+    for (const character of responsePhase.blockCharacters || []) {
+      options.push(`<button class="challenge-option" type="button" data-response="BLOCK" data-block-character="${escapeHtml(character)}"><span class="challenge-option-title">Block with ${escapeHtml(characterNames[character] || character)}</span><span class="challenge-option-desc">Claim ${escapeHtml(characterNames[character] || character)}.</span></button>`);
+    }
+    if (responsePhase.allowed.includes('PASS')) {
+      options.push('<button class="challenge-option" type="button" data-response="PASS"><span class="challenge-option-title">Pass</span></button>');
     }
 
-    const waiting = options.length ? '' : `<p class="modal-copy">${isActionPlayer ? 'Waiting for challenges or blocks...' : 'Waiting for the other players...'}</p>`;
-    panel.innerHTML = `<h3>${escapeHtml(current?.name || 'Player')} · ${escapeHtml(actionLabel(selectedAction))}</h3><div class="challenge-options">${options.join('')}</div>${waiting}`;
+    const responders = (responsePhase.responders || []).map(responder => {
+      const status = responder.status === 'waiting' ? 'Waiting...' : `✓ ${responder.status}`;
+      return `<div class="challenge-option-desc">${escapeHtml(responder.name)}: ${escapeHtml(status)}</div>`;
+    }).join('');
+    panel.innerHTML = `<h3>${escapeHtml(current?.name || 'Player')} · ${escapeHtml(actionLabel(state.selectedAction))}</h3><div class="challenge-options">${options.join('')}</div><div class="response-statuses" aria-live="polite">${responders}</div>${options.length ? '' : '<p class="modal-copy">Waiting for responses...</p>'}`;
   }
 
   function renderExchange() {
@@ -477,14 +488,37 @@
       selectedExchange = new Set();
       return;
     }
+    const keepCount = Math.min(state.players[state.myIndex]?.cardCount || 0, hand.length);
     const signature = hand.join(',');
     if (signature !== exchangeSignature) {
       exchangeSignature = signature;
       selectedExchange = new Set();
     }
     byId('exchange-cards').innerHTML = hand.map((character, index) => cardMarkup(character, index, selectedExchange.has(index), true)).join('');
-    byId('exchange-count').textContent = `${selectedExchange.size} / 2 selected`;
-    byId('confirm-exchange').disabled = selectedExchange.size !== 2;
+    byId('exchange-count').textContent = `${selectedExchange.size} / ${keepCount} selected`;
+    byId('confirm-exchange').disabled = selectedExchange.size !== keepCount;
+  }
+
+  function showCardReveal(reveal) {
+    const banner = byId('card-reveal');
+    if (!banner) return;
+    if (!reveal) {
+      if (cardRevealTimer) window.clearTimeout(cardRevealTimer);
+      cardRevealTimer = null;
+      displayedCardRevealId = null;
+      banner.hidden = true;
+      return;
+    }
+    if (reveal.id === displayedCardRevealId) return;
+    displayedCardRevealId = reveal.id;
+    const character = characterNames[reveal.card] || reveal.card;
+    banner.innerHTML = `<span>${escapeHtml(reveal.playerName)} lost an Influence<strong>${escapeHtml(character)}</strong></span><img src="/cards/${encodeURIComponent(reveal.card)}.jpg" alt="${escapeHtml(character)} revealed">`;
+    banner.hidden = false;
+    if (cardRevealTimer) window.clearTimeout(cardRevealTimer);
+    cardRevealTimer = window.setTimeout(() => {
+      banner.hidden = true;
+      cardRevealTimer = null;
+    }, 6500);
   }
 
   function renderLog() {
@@ -508,6 +542,7 @@
 
   function renderGame() {
     setScreen('game');
+    showCardReveal(state.cardReveal);
     const me = state.players[state.myIndex];
     const current = state.players[state.currentPlayer];
     byId('game-code').textContent = `ROOM ${state.code}`;
@@ -569,7 +604,9 @@
     const button = event.target.closest('button');
     if (!button) return;
 
-    if (button.id === 'create-room') return createRoom();
+    if (button.id === 'create-room') return openCreateRoomScreen();
+    if (button.id === 'confirm-create-room') return createRoom(byId('create-room-name').value);
+    if (button.id === 'cancel-create-room') return cancelCreateRoom();
     if (button.id === 'join-room') return joinRoom();
     if (button.id === 'start-game') return socket?.emit('startGame');
     if (button.id === 'copy-room-code') {
@@ -587,19 +624,33 @@
       pendingTargetAction = null;
       return;
     }
-    if (button.hasAttribute('data-challenge')) return socket?.emit('challenge', { isCounterChallenge: false });
-    if (button.dataset.counter) return socket?.emit('counter', { char: button.dataset.counter });
-    if (button.hasAttribute('data-counter-challenge')) return socket?.emit('counterChallenge');
+    if (button.dataset.response) {
+      button.disabled = true;
+      const response = { type: button.dataset.response };
+      if (button.dataset.blockCharacter) response.char = button.dataset.blockCharacter;
+      return socket?.emit('actionResponse', response, result => {
+        if (result?.error) {
+          showToast(result.error, true);
+          if (state) renderChallenge();
+        }
+      });
+    }
     if (button.dataset.exchangeIndex !== undefined) {
       const index = Number(button.dataset.exchangeIndex);
+      const keepCount = Math.min(state?.players[state.myIndex]?.cardCount || 0, state?.exchangeHand?.length || 0);
       if (selectedExchange.has(index)) selectedExchange.delete(index);
-      else if (selectedExchange.size < 2) selectedExchange.add(index);
+      else if (selectedExchange.size < keepCount) selectedExchange.add(index);
       if (state) renderExchange();
       return;
     }
     if (button.id === 'confirm-exchange') {
-      socket?.emit('exchangeSelect', { keepIndices: [...selectedExchange] });
-      byId('exchange-modal').classList.remove('active');
+      socket?.emit('exchangeSelect', { keepIndices: [...selectedExchange] }, result => {
+        if (result?.error) {
+          showToast(result.error, true);
+          return;
+        }
+        byId('exchange-modal').classList.remove('active');
+      });
       return;
     }
     if (button.id === 'open-rules') {
@@ -695,7 +746,8 @@
       byId('audio-settings-modal').classList.remove('active');
       if (state?.phase !== 'exchange_select') byId('exchange-modal').classList.remove('active');
     }
-    if (event.key === 'Enter' && document.activeElement === byId('player-name')) createRoom();
+    if (event.key === 'Enter' && document.activeElement === byId('player-name')) openCreateRoomScreen();
+    if (event.key === 'Enter' && document.activeElement === byId('create-room-name')) createRoom(byId('create-room-name').value);
     if (event.key === 'Enter' && document.activeElement === byId('room-code-input')) joinRoom();
   });
 
@@ -703,24 +755,8 @@
     socket.on('connect', async () => {
       byId('connection-state').textContent = 'Connected';
       setStatus('Connected. Create a room or join with a code.');
-      if (createNewRoomInProgress) {
-        if (pendingLeaveRoom) {
-          const oldRoom = pendingLeaveRoom;
-          const reconnectResult = await emitWithAck('reconnect', oldRoom);
-          if (!reconnectResult.error) {
-            const leaveResult = await emitWithAck('leaveRoom', { code: oldRoom.code });
-            if (leaveResult.error) {
-              if (!socket.connected) {
-                setStatus('Connection lost. Reconnecting to leave the previous room...');
-                socket.connect();
-                return;
-              }
-              return unlockCreateNewRoomButton(leaveResult.error);
-            }
-          }
-          pendingLeaveRoom = null;
-        }
-        await finishPendingNewRoom();
+      if (pendingLeaveRoom) {
+        await finishPendingRoomLeave();
         return;
       }
       const saved = readSavedRoom();
@@ -740,6 +776,7 @@
       if (state.code && saved?.name) saveRoom(state.code, saved.name);
       render();
     });
+    socket.on('card_revealed', reveal => showCardReveal(reveal));
     socket.on('emojiReaction', data => showFloatingEmoji(data.emoji, data.playerId));
     socket.on('disconnect', () => {
       byId('connection-state').textContent = 'Reconnecting...';

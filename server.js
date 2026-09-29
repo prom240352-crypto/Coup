@@ -63,10 +63,13 @@ function createRoom(hostId, hostName) {
     pendingCounters: new Set(),
     challengeResults: [],
     counterResults: [],
+    responsePhase: null,
     timer: null,
     timerEnd: null,
     winner: null,
     log: [],
+    cardReveal: null,
+    cardRevealSequence: 0,
     // Exchange UI state
     exchangePhase: null,       // null | 'selecting'
     exchangeDrawn: [],         // cards drawn for exchange
@@ -122,6 +125,7 @@ function startGame(room) {
   room.currentPlayer = 0;
   room.exchangePhase = null;
   room.counterChallengePhase = false;
+  room.responsePhase = null;
   room.actionToken = 0;
   room.resolvedActionToken = null;
   room.log.push({ type: 'system', message: 'Game started!' });
@@ -180,7 +184,7 @@ function getPlayerView(room, playerId) {
     currentPlayer: room.currentPlayer,
     selectedAction: room.selectedAction,
     selectedTarget: room.selectedTarget,
-    timerEnd: room.timerEnd,
+    timerEnd: room.phase === 'challenging' ? null : room.timerEnd,
     timerDuration: room.timerDuration || 10000,
     myIndex: room.players.findIndex(p => p.id === playerId),
     players: room.players.map((p, i) => ({
@@ -205,9 +209,30 @@ function getPlayerView(room, playerId) {
     counterChallengeTimerEnd: room.counterChallengeTimerEnd,
     counterChallengeDuration: room.counterChallengeDuration || 6000,
     pendingCounter: room.pendingCounter,
+    responsePhase: room.responsePhase ? {
+      kind: room.responsePhase.kind,
+      responders: room.responsePhase.displayResponders.map(playerIndex => {
+        const player = room.players[playerIndex];
+        const response = room.responsePhase.responses.find(entry => entry.playerIndex === playerIndex);
+        return player ? { name: player.name, status: response?.type || 'waiting' } : null;
+      }).filter(Boolean),
+      allowed: room.responsePhase.eligibleResponders.includes(room.players.findIndex(entry => entry.id === playerId))
+        ? room.responsePhase.allowedByPlayer[room.players.findIndex(entry => entry.id === playerId)]?.types || []
+        : [],
+      blockCharacters: room.responsePhase.eligibleResponders.includes(room.players.findIndex(entry => entry.id === playerId))
+        ? room.responsePhase.allowedByPlayer[room.players.findIndex(entry => entry.id === playerId)]?.blockCharacters || []
+        : []
+    } : null,
     // Card reveal
     lastLostCard: room.lastLostCard,
-    lastLostPlayerIndex: room.lastLostPlayerIndex
+    lastLostPlayerIndex: room.lastLostPlayerIndex,
+    cardReveal: room.cardReveal ? {
+      id: room.cardReveal.id,
+      playerIndex: room.cardReveal.playerIndex,
+      playerName: room.cardReveal.playerName,
+      card: room.cardReveal.card,
+      reason: room.cardReveal.reason
+    } : null
   };
   return view;
 }
@@ -242,6 +267,7 @@ function nextTurn(room) {
   room.pendingCounters.clear();
   room.challengeResults = [];
   room.counterResults = [];
+  room.responsePhase = null;
   room.exchangePhase = null;
   room.exchangeDrawn = [];
   room.exchangeHand = [];
@@ -281,14 +307,8 @@ function executeAction(room, action, target) {
       
     case 'foreign_aid':
       room.selectedAction = action;
-      room.phase = 'challenging';
-      room.timerEnd = Date.now() + 8000;
-      room.timerDuration = 8000;
       room.log.push({ type: 'action', message: `${player.name} takes Foreign Aid (+2 coins)` });
-      broadcastRoom(room);
-      room.timer = setTimeout(() => {
-        resolveForeignAid(room);
-      }, 8000);
+      beginActionResponses(room);
       break;
       
     case 'coup':
@@ -308,14 +328,8 @@ function executeAction(room, action, target) {
       
     case 'tax':
       room.selectedAction = action;
-      room.phase = 'challenging';
-      room.timerEnd = Date.now() + 8000;
-      room.timerDuration = 8000;
       room.log.push({ type: 'action', message: `${player.name} claims Duke and takes Tax (+3 coins)` });
-      broadcastRoom(room);
-      room.timer = setTimeout(() => {
-        resolveTax(room);
-      }, 8000);
+      beginActionResponses(room);
       break;
       
     case 'assassinate':
@@ -323,42 +337,140 @@ function executeAction(room, action, target) {
       player.coins -= 3;
       room.selectedAction = action;
       room.selectedTarget = target;
-      room.phase = 'challenging';
-      room.timerEnd = Date.now() + 8000;
-      room.timerDuration = 8000;
       room.log.push({ type: 'action', message: `${player.name} claims Assassin and targets ${room.players[target].name}` });
-      broadcastRoom(room);
-      room.timer = setTimeout(() => {
-        resolveAssassinate(room);
-      }, 8000);
+      beginActionResponses(room);
       break;
       
     case 'exchange':
       room.selectedAction = action;
-      room.phase = 'challenging';
-      room.timerEnd = Date.now() + 8000;
-      room.timerDuration = 8000;
       room.log.push({ type: 'action', message: `${player.name} claims Ambassador and exchanges cards` });
-      broadcastRoom(room);
-      room.timer = setTimeout(() => {
-        resolveExchange(room);
-      }, 8000);
+      beginActionResponses(room);
       break;
       
     case 'steal':
       if (target === null) return;
       room.selectedAction = action;
       room.selectedTarget = target;
-      room.phase = 'challenging';
-      room.timerEnd = Date.now() + 8000;
-      room.timerDuration = 8000;
       room.log.push({ type: 'action', message: `${player.name} claims Captain and steals from ${room.players[target].name}` });
-      broadcastRoom(room);
-      room.timer = setTimeout(() => {
-        resolveSteal(room);
-      }, 8000);
+      beginActionResponses(room);
       break;
   }
+}
+
+function getActionResolver(action) {
+  return {
+    foreign_aid: resolveForeignAid,
+    tax: resolveTax,
+    assassinate: resolveAssassinate,
+    exchange: resolveExchange,
+    steal: resolveSteal
+  }[action] || null;
+}
+
+function beginActionResponses(room) {
+  if (room.timer) clearTimeout(room.timer);
+  room.timer = null;
+  room.timerEnd = null;
+  room.counterChallengeTimerEnd = null;
+  room.phase = 'challenging';
+  room.counterResults = [];
+  room.challengeResults = [];
+  room.counterChallengePhase = false;
+  room.pendingCounter = null;
+
+  const actorIndex = room.currentPlayer;
+  const action = room.selectedAction;
+  const alivePlayers = room.players
+    .map((player, index) => player.alive && player.cards.length > 0 ? index : -1)
+    .filter(index => index >= 0 && index !== actorIndex);
+  const targetIndex = room.selectedTarget;
+  const blockCharacters = {
+    foreign_aid: ['duke'],
+    assassinate: ['contessa'],
+    steal: ['captain', 'ambassador']
+  }[action] || [];
+  const allowedByPlayer = {};
+  const eligibleResponders = [];
+
+  for (const playerIndex of alivePlayers) {
+    const allowed = [];
+    const canBlock = blockCharacters.length && (action === 'foreign_aid' || playerIndex === targetIndex);
+    if (action !== 'foreign_aid') allowed.push('CHALLENGE');
+    if (canBlock) allowed.push('BLOCK');
+    if (!allowed.length) continue;
+    allowed.push('PASS');
+    eligibleResponders.push(playerIndex);
+    allowedByPlayer[playerIndex] = {
+      types: allowed,
+      blockCharacters: canBlock ? blockCharacters : []
+    };
+  }
+
+  room.responsePhase = {
+    kind: 'action',
+    eligibleResponders,
+    displayResponders: eligibleResponders.slice(),
+    allowedByPlayer,
+    responses: []
+  };
+  broadcastRoom(room);
+
+  if (eligibleResponders.length === 0) resolveCurrentAction(room);
+}
+
+function resolveCurrentAction(room) {
+  const resolve = getActionResolver(room.selectedAction);
+  if (!resolve) return;
+  room.responsePhase = null;
+  room.counterChallengePhase = false;
+  room.pendingCounter = null;
+  resolve(room);
+}
+
+function beginCounterResponse(room, blockerIndex, char) {
+  const phase = room.responsePhase;
+  const actorIndex = room.currentPlayer;
+  room.counterResults = [{ playerIndex: blockerIndex, char }];
+  room.pendingCounter = { playerIndex: blockerIndex, char };
+  room.counterChallengePhase = true;
+  room.responsePhase = {
+    kind: 'counter',
+    eligibleResponders: [actorIndex],
+    displayResponders: [...new Set([...(phase?.displayResponders || []), actorIndex])],
+    allowedByPlayer: { [actorIndex]: { types: ['CHALLENGE', 'PASS'], blockCharacters: [] } },
+    responses: [...(phase?.responses || []), { playerIndex: blockerIndex, type: 'BLOCK' }]
+  };
+  room.log.push({ type: 'counter', message: `${room.players[blockerIndex].name} blocks with ${CHARACTERS[char].name}!` });
+  broadcastRoom(room);
+}
+
+function submitActionResponse(room, playerIndex, type, char) {
+  const phase = room.responsePhase;
+  if (!room || room.phase !== 'challenging' || !phase) return { error: 'No response phase is active.' };
+  if (!phase.eligibleResponders.includes(playerIndex)) return { error: 'You are not eligible to respond.' };
+  if (phase.responses.some(response => response.playerIndex === playerIndex)) return { error: 'You have already responded.' };
+  const allowed = phase.allowedByPlayer[playerIndex]?.types || [];
+  if (!allowed.includes(type)) return { error: 'That response is not allowed.' };
+
+  if (type === 'BLOCK') {
+    const allowedChars = phase.allowedByPlayer[playerIndex]?.blockCharacters || [];
+    if (!allowedChars.includes(char)) return { error: 'That block is not allowed.' };
+    beginCounterResponse(room, playerIndex, char);
+    return { success: true };
+  }
+
+  phase.responses.push({ playerIndex, type });
+  if (type === 'CHALLENGE') {
+    room.challengeResults.push({ playerIndex, counterChallenge: phase.kind === 'counter' });
+    room.log.push({ type: 'challenge', message: `${room.players[playerIndex].name} challenges${phase.kind === 'counter' ? ' the counter' : ''}!` });
+    resolveCurrentAction(room);
+    return { success: true };
+  }
+
+  if (phase.kind === 'counter') resolveCurrentAction(room);
+  else if (phase.responses.filter(response => response.type === 'PASS').length === phase.eligibleResponders.length) resolveCurrentAction(room);
+  else broadcastRoom(room);
+  return { success: true };
 }
 
 function resolveWithAnimation(room, resolveFn) {
@@ -534,12 +646,16 @@ function finishExchange(room, keepIndices, automatic = false) {
   const hand = Array.isArray(room.exchangeHand) ? room.exchangeHand.slice() : [];
   if (!player || room.exchangePhase !== 'selecting' || hand.length === 0) return false;
 
-  const keepCount = Math.min(2, hand.length);
-  const indices = Array.isArray(keepIndices) ? keepIndices : Array.from({ length: keepCount }, (_, i) => i);
-  const unique = [...new Set(indices.filter(i => Number.isInteger(i) && i >= 0 && i < hand.length))];
-  if (unique.length !== keepCount) return false;
+  const keepCount = player.cards.length;
+  if (keepCount < 1 || hand.length < keepCount) return false;
+  const indices = automatic && keepIndices == null
+    ? Array.from({ length: keepCount }, (_, i) => i)
+    : keepIndices;
+  if (!Array.isArray(indices) || indices.length !== keepCount
+    || indices.some(index => !Number.isInteger(index) || index < 0 || index >= hand.length)
+    || new Set(indices).size !== indices.length) return false;
 
-  const keepSet = new Set(unique);
+  const keepSet = new Set(indices);
   const kept = [];
   const returned = [];
   for (let i = 0; i < hand.length; i++) {
@@ -702,6 +818,15 @@ function loseInfluence(room, playerIndex) {
     // Store for card reveal animation
     room.lastLostCard = lost;
     room.lastLostPlayerIndex = playerIndex;
+    const reveal = {
+      id: `${room.code}:${++room.cardRevealSequence}`,
+      playerIndex,
+      playerName: player.name,
+      card: lost,
+      reason: room.selectedAction || null
+    };
+    room.cardReveal = reveal;
+    io.to(room.code).emit('card_revealed', reveal);
     room.log.push({ type: 'system', message: `${player.name} loses ${CHARACTERS[lost].name}` });
     if (player.cards.length === 0) {
       player.alive = false;
@@ -790,107 +915,31 @@ io.on('connection', (socket) => {
   });
 
   // Exchange card selection
-  socket.on('exchangeSelect', ({ keepIndices }) => {
+  socket.on('exchangeSelect', (payload = {}, callback) => {
     const room = findRoom(socket.id);
-    if (!room || room.exchangePhase !== 'selecting' || room.phase !== 'exchange_select') return;
+    if (!room || room.exchangePhase !== 'selecting' || room.phase !== 'exchange_select') {
+      return callback?.({ error: 'No active Exchange selection.' });
+    }
 
     const playerIndex = room.players.findIndex(p => p.id === socket.id);
-    if (playerIndex !== room.currentPlayer) return;
+    if (playerIndex !== room.currentPlayer) return callback?.({ error: 'Only the active player may select Exchange cards.' });
 
-    const handLength = room.exchangeHand.length;
-    const keepCount = Math.min(2, handLength);
-    if (!Array.isArray(keepIndices) || keepIndices.length !== keepCount) {
-      autoDiscardExchange(room);
-      return;
+    if (!finishExchange(room, payload?.keepIndices, false)) {
+      return callback?.({ error: 'Invalid Exchange selection.' });
     }
-    if (!finishExchange(room, keepIndices, false)) return;
 
+    callback?.({ success: true });
     if (!checkWinner(room)) nextTurn(room);
     else broadcastRoom(room);
   });
 
-  socket.on('challenge', ({ isCounterChallenge }) => {
+  socket.on('actionResponse', (payload = {}, callback) => {
     const room = findRoom(socket.id);
-    if (!room || room.phase !== 'challenging') return;
-    
+    if (!room) return callback?.({ error: 'You are not in a room.' });
     const playerIndex = room.players.findIndex(p => p.id === socket.id);
-    if (playerIndex === room.currentPlayer) return;
-    
-    // Cannot challenge foreign_aid, income, or coup
-    if (['foreign_aid', 'income', 'coup'].includes(room.selectedAction)) return;
-    
-    room.challengeResults.push({
-      playerIndex,
-      counterChallenge: isCounterChallenge || false
-    });
-    
-    const player = room.players[playerIndex];
-    room.log.push({ type: 'challenge', message: `${player.name} challenges!` });
-    
-    // Immediately resolve the challenge
-    if (room.timer) clearTimeout(room.timer);
-    resolveChallenge(room);
-  });
-  
-  socket.on('counter', ({ char }) => {
-    const room = findRoom(socket.id);
-    if (!room || room.phase !== 'challenging' || room.counterChallengePhase) return;
-
-    const playerIndex = room.players.findIndex(p => p.id === socket.id);
-    if (playerIndex < 0 || playerIndex === room.currentPlayer) return;
-
-    const allowed = {
-      foreign_aid: ['duke'],
-      assassinate: ['contessa'],
-      steal: ['captain', 'ambassador']
-    };
-    if (!allowed[room.selectedAction]?.includes(char)) return;
-    if (room.selectedTarget !== null && playerIndex !== room.selectedTarget) return;
-
-    // Only one counter can be active for an action. This prevents duplicate
-    // counter clicks from scheduling multiple turn resolutions.
-    if (room.counterResults.length > 0) return;
-
-    room.counterResults.push({ playerIndex, char });
-    const player = room.players[playerIndex];
-    room.log.push({ type: 'counter', message: `${player.name} counters with ${CHARACTERS[char].name}!` });
-
-    room.counterChallengePhase = true;
-    room.pendingCounter = { playerIndex, char };
-    room.counterChallengeTimerEnd = Date.now() + 6000;
-    room.counterChallengeDuration = 6000;
-    broadcastRoom(room);
-
-    if (room.counterChallengeTimer) clearTimeout(room.counterChallengeTimer);
-    const token = room.actionToken;
-    room.counterChallengeTimer = setTimeout(() => {
-      if (room.actionToken !== token) return;
-      room.counterChallengePhase = false;
-      room.pendingCounter = null;
-      broadcastRoom(room);
-    }, 6000);
-  });
-
-  // Action player challenges the counter
-  socket.on('counterChallenge', () => {
-    const room = findRoom(socket.id);
-    if (!room || !room.counterChallengePhase || room.phase !== 'challenging') return;
-    
-    const playerIndex = room.players.findIndex(p => p.id === socket.id);
-    if (playerIndex !== room.currentPlayer) return;
-    
-    if (room.counterChallengeTimer) clearTimeout(room.counterChallengeTimer);
-    room.counterChallengePhase = false;
-    
-    // Record the counter challenge
-    room.challengeResults.push({
-      playerIndex,
-      counterChallenge: true
-    });
-    
-    const player = room.players[playerIndex];
-    room.log.push({ type: 'challenge', message: `${player.name} challenges the counter!` });
-    broadcastRoom(room);
+    const { type, char } = payload && typeof payload === 'object' ? payload : {};
+    const response = submitActionResponse(room, playerIndex, type, char);
+    callback?.(response);
   });
 
   // Emoji reactions
@@ -900,14 +949,18 @@ io.on('connection', (socket) => {
     socket.to(room.code).emit('emojiReaction', { emoji, playerId: socket.id });
   });
 
-  socket.on('leaveRoom', (_payload, callback) => {
-    const room = findRoom(socket.id);
+  socket.on('leaveRoom', (payload = {}, callback) => {
+    const room = payload.code ? findRoomByCode(payload.code) : findRoom(socket.id);
     if (!room) return callback?.({ success: true });
     if (room.state !== 'finished') return callback?.({ error: 'You can only leave a finished room this way.' });
 
-    const result = leaveFinishedRoom(room, socket.id);
+    const player = room.players.find(entry => entry.id === socket.id)
+      || room.players.find(entry => entry.disconnected && payload.name && entry.name === payload.name);
+    if (!player) return callback?.({ success: true });
+    const result = leaveFinishedRoom(room, player.id);
     if (result.error) return callback?.(result);
-    socket.leave(room.code);
+    if (player.id === socket.id) socket.leave(room.code);
+    broadcastRoom(room);
     callback?.(result);
   });
 
@@ -933,6 +986,7 @@ io.on('connection', (socket) => {
     room.pendingCounter = null;
     room.lastLostCard = null;
     room.lastLostPlayerIndex = null;
+    room.cardReveal = null;
     room.actionToken = 0;
     room.resolvedActionToken = null;
     
@@ -1000,5 +1054,5 @@ if (require.main === module) {
 module.exports = {
   app, server, io, rooms, CHARACTERS, createDeck, createRoom, leaveFinishedRoom, startGame, executeAction,
   resolveForeignAid, resolveSteal, resolveExchange, finishExchange, autoDiscardExchange,
-  loseInfluence, nextTurn, checkWinner, findRoomByCode
+  loseInfluence, getPlayerView, nextTurn, checkWinner, findRoomByCode
 };

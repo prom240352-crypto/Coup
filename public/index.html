@@ -141,6 +141,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;background:radial-gradi
 .challenge-option:hover{border-color:var(--crimson);background:var(--panel2)}
 .challenge-option-title{font-weight:700;color:var(--gold);font-size:13px;margin-bottom:2px}
 .challenge-option-desc{font-size:11px;color:var(--text-dim)}
+.response-statuses{display:grid;gap:4px;margin-top:10px;text-align:left}
+.response-statuses .challenge-option-desc{padding:3px 2px}
 
 /* GAME LOG */
 .game-log{position:absolute;top:50px;right:8px;width:min(250px,40vw);max-height:150px;overflow-y:auto;background:rgba(20,20,30,0.8);border:1px solid var(--border);border-radius:8px;padding:8px;font-size:10px;color:var(--text-dim);z-index:8;backdrop-filter:blur(4px);box-shadow:0 8px 30px rgba(0,0,0,.22)}
@@ -210,6 +212,10 @@ body::before{content:'';position:fixed;inset:0;z-index:0;background:radial-gradi
 .exchange-card span{position:absolute;left:0;right:0;bottom:0;padding:4px;background:rgba(0,0,0,.78);font-size:11px;text-align:center}
 .exchange-actions{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .game-message{position:absolute;left:50%;top:calc(50% + 86px);transform:translateX(-50%);z-index:9;max-width:min(78vw,420px);padding:7px 12px;border:1px solid var(--border);border-radius:6px;background:rgba(8,8,16,.82);text-align:center;font-size:12px;color:var(--text-dim)}
+.card-reveal{position:absolute;top:54px;left:10px;z-index:12;display:flex;align-items:center;gap:8px;max-width:min(56vw,280px);padding:7px 10px;border:1px solid rgba(212,168,67,.55);border-radius:6px;background:rgba(8,8,16,.94);box-shadow:0 8px 24px rgba(0,0,0,.35);font-size:11px;color:var(--gold)}
+.card-reveal[hidden]{display:none}
+.card-reveal img{width:34px;height:50px;flex:none;object-fit:cover;border:1px solid var(--gold);border-radius:3px}
+.card-reveal strong{display:block;color:var(--text);font-family:'Cinzel',serif;font-size:11px}
 .emoji-bar{position:absolute;right:12px;bottom:14px;z-index:15;display:flex;gap:4px}
 .emoji-bar button{width:36px;height:36px;border:1px solid var(--border);border-radius:50%;background:var(--panel);font-size:18px;cursor:pointer}
 .emoji-float{position:fixed;z-index:170;font-size:36px;pointer-events:none;animation:emojiRise 1.8s ease-out forwards}
@@ -251,6 +257,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;background:radial-gradi
   .action-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
   .action-btn{padding:8px 4px}
   .challenge-panel{width:min(400px,92vw);padding:16px}
+  .challenge-option{min-height:44px}
+  #create-room-screen .btn{min-height:46px}
   .timer-ring{width:92px;height:92px}
   .timer-text{font-size:20px}
   .game-message{top:calc(50% + 66px);font-size:10px}
@@ -289,6 +297,21 @@ body::before{content:'';position:fixed;inset:0;z-index:0;background:radial-gradi
     </div>
   </section>
 
+  <section class="screen" id="create-room-screen" aria-labelledby="create-room-title">
+    <h1 class="lobby-title" id="create-room-title">COUP</h1>
+    <p class="lobby-subtitle">Create a new room</p>
+    <div class="lobby-box">
+      <h2>Room Setup</h2>
+      <div class="input-group">
+        <label for="create-room-name">Your name</label>
+        <input id="create-room-name" name="create-room-name" maxlength="18" autocomplete="nickname" placeholder="Choose a name">
+      </div>
+      <button class="btn btn-primary" id="confirm-create-room" type="button">Create Room</button>
+      <button class="btn btn-secondary" id="cancel-create-room" type="button">Cancel</button>
+      <p class="lobby-status" id="create-room-status" role="status" aria-live="polite"></p>
+    </div>
+  </section>
+
   <section class="screen" id="waiting" aria-labelledby="waiting-title">
     <h1 class="lobby-title" id="waiting-title">COUP</h1>
     <p class="lobby-subtitle">Waiting for players</p>
@@ -323,6 +346,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;background:radial-gradi
       </div>
       <div class="timer-ring" id="timer-ring" aria-hidden="true"><svg viewBox="0 0 120 120"><circle class="bg" cx="60" cy="60" r="54"></circle><circle class="progress" id="timer-progress" cx="60" cy="60" r="54"></circle></svg><span class="timer-text" id="timer-text"></span></div>
       <div class="game-message" id="game-message" aria-live="polite"></div>
+      <div class="card-reveal" id="card-reveal" role="status" aria-live="polite" hidden></div>
       <div id="player-seats"></div>
     </div>
     <div class="game-log" id="game-log" aria-label="Game log" aria-live="polite"></div>
@@ -343,7 +367,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;background:radial-gradi
   <div class="modal"><button class="modal-close" id="close-audio-settings" type="button" aria-label="Close audio settings">×</button><h2 id="audio-settings-title">Audio Settings</h2><div class="exchange-actions"><button class="btn btn-secondary" id="sound-toggle-settings" type="button">Sound: On</button><label>Volume <input class="volume-slider" id="volume-slider-settings" type="range" min="0" max="100" value="65" aria-label="Master sound volume"></label></div><button class="btn btn-primary audio-test-btn" id="test-sound" type="button">Test Sound</button><p class="audio-debug-status" id="audio-test-status" role="status" aria-live="polite">Ready to test audio output.</p><dl class="audio-debug-list" aria-label="Audio Debug"><dt>API</dt><dd id="audio-debug-api">Checking</dd><dt>Context</dt><dd id="audio-debug-context">Not created</dd><dt>Output</dt><dd id="audio-debug-output">Unavailable</dd><dt>Sound</dt><dd id="audio-debug-enabled">On</dd><dt>Volume</dt><dd id="audio-debug-volume">65%</dd><dt>Last sound</dt><dd id="audio-debug-last-sound">None</dd><dt>Last error</dt><dd class="audio-debug-error" id="audio-debug-error">None</dd></dl></div>
 </div>
 <div class="modal-overlay" id="exchange-modal" role="dialog" aria-modal="true" aria-labelledby="exchange-title">
-  <div class="modal"><h2 id="exchange-title">Choose Two Influences</h2><p class="modal-copy">Select exactly two cards to keep.</p><div class="exchange-grid" id="exchange-cards"></div><div class="exchange-actions"><span id="exchange-count" aria-live="polite">0 / 2 selected</span><button class="btn btn-primary" id="confirm-exchange" type="button" disabled>Keep Cards</button></div></div>
+  <div class="modal"><h2 id="exchange-title">Exchange Influences</h2><p class="modal-copy">Select the cards you will keep.</p><div class="exchange-grid" id="exchange-cards"></div><div class="exchange-actions"><span id="exchange-count" aria-live="polite">0 selected</span><button class="btn btn-primary" id="confirm-exchange" type="button" disabled>Keep Cards</button></div></div>
 </div>
 <div class="modal-overlay" id="winner-modal" role="dialog" aria-modal="true" aria-labelledby="winner-title">
   <div class="modal"><h2 id="winner-title">The Court Is Settled</h2><p class="modal-copy" id="winner-message"></p><div class="winner-actions"><button class="btn btn-primary" id="rematch" type="button">Rematch</button><button class="btn btn-secondary" id="create-new-room" type="button">Create New Room</button></div></div>
