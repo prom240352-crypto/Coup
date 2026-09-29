@@ -18,6 +18,10 @@ assert(html.includes('id="test-sound"') && html.includes('id="audio-debug-error"
 assert(html.indexOf('src="/sound.js"')<html.indexOf('src="/app.js"'),'sound controller must load before the game app');
 assert(html.includes('id="rematch"') && html.includes('id="create-new-room"'),'result modal must offer rematch and create-new-room actions');
 assert(html.includes('id="card-reveal"'),'frontend must provide a public card-reveal status element');
+assert(html.includes('.action-btn.selected') && html.includes('.target-focus .opponent-seat:not(.target-selected)'),'action and target states must have clear selected and reduced-emphasis styling');
+assert(html.includes('.response-flow') && html.includes('.response-challenge') && html.includes('.response-block') && html.includes('.response-pass'),'response choices and phase status must have distinct visual treatments');
+assert(html.includes('@keyframes cardRevealFlip') && html.includes('@keyframes impactFlash') && html.includes('@keyframes screenEnter'),'brief reveal, impact, and screen transitions must be defined');
+assert(html.includes('@media(prefers-reduced-motion:reduce)') && html.includes('.challenge-panel{width:min(400px,92vw);max-height:calc(100dvh - 28px);padding:16px}'),'motion and response controls must respect accessibility and small screens');
 assert(html.includes('.winner-actions{display:flex;flex-direction:column') && html.includes('.winner-actions .btn{width:100%;min-height:46px'),'result actions must stack and remain tappable on narrow screens');
 for (const asset of ['sound.js','app.js','rules-reference.jpg','cards/ambassador.jpg','cards/assassin.jpg','cards/captain.jpg','cards/contessa.jpg','cards/duke.jpg']) {
   assert(fs.existsSync(path.join(publicDir,asset)),`missing public asset: ${asset}`);
@@ -43,6 +47,8 @@ assert(client.includes("byId('create-new-room').disabled = true;") && client.inc
 const createNewRoomHandler=client.indexOf('async function createNewRoomFromResult()');
 assert(createNewRoomHandler>=0 && client.indexOf('if (createNewRoomInProgress) return;',createNewRoomHandler)<client.indexOf('await ',createNewRoomHandler),'duplicate-tap guard must run synchronously before any async room operation');
 assert(client.includes("button.id === 'test-sound'") && client.includes('soundEngine?.testSound()'),'Test Sound must call the audio controller directly from its click handler');
+assert(client.includes("socket.on('card_revealed'") && client.includes('INFLUENCE -1') && client.includes('}, 2800);'),'public card reveal should identify the lost influence and clear promptly');
+assert(client.includes('responsePhase.allowed.includes') && client.includes("response.type === 'PASS'"),'response UI and pass feedback must use the viewer-specific server allowance');
 for (const cue of ['cardCast','challenge','counter','success','failure','loss','elimination','turn','gameStart','gameEnd']) {
   assert(soundApi.patterns[cue],`missing synthesized sound cue: ${cue}`);
   assert(client.includes(`'${cue}'`),`game client does not map an event to sound cue: ${cue}`);
@@ -130,7 +136,8 @@ function createAppHarness(socket,initialStorage={}) {
   vm.runInContext(fs.readFileSync(path.join(publicDir,'app.js'),'utf8'),context,{filename:'public/app.js'});
   return {
     elements,storage,documentHandlers,
-    click(id){const button=elements.get(id);return documentHandlers.click({target:{closest:()=>button}});}
+    click(id){const button=elements.get(id);return documentHandlers.click({target:{closest:()=>button}});},
+    clickData(dataset){const button={id:'',dataset};return documentHandlers.click({target:{closest:()=>button}});}
   };
 }
 
@@ -477,6 +484,57 @@ function createAppHarness(socket,initialStorage={}) {
     clearTimeout(freshRoom.timer);
     freshRoom.timer=null;
     freshRoom.state='finished';
+
+    const visualPlayers=[
+      {id:host.id,name:'Host',coins:3,cardCount:2,alive:true,isMe:true,disconnected:false,cards:['duke','captain']},
+      {id:nextPlayer.id,name:'Next Player',coins:2,cardCount:2,alive:true,isMe:false,disconnected:false,cards:null}
+    ];
+    const visualState={
+      code:fresh.code,state:'playing',phase:'selecting',currentPlayer:0,selectedAction:null,selectedTarget:null,
+      timerEnd:null,timerDuration:10000,myIndex:0,deckCount:11,winner:null,log:[],myCards:['duke','captain'],
+      exchangePhase:null,exchangeHand:null,counterChallengePhase:false,counterChallengeTimerEnd:null,
+      counterChallengeDuration:6000,pendingCounter:null,lastLostCard:null,lastLostPlayerIndex:null,cardReveal:null,responsePhase:null,
+      players:visualPlayers
+    };
+    const deliverVisualState=async(view,predicate)=>{
+      const received=waitForGameState(host,predicate);
+      io.to(host.id).emit('gameState',view);
+      await received;
+    };
+    await deliverVisualState(visualState,gameState=>gameState.code===fresh.code && gameState.phase==='selecting' && gameState.selectedAction===null);
+    appHarness.clickData({selectAction:'assassinate'});
+    assert(appHarness.elements.get('action-content').innerHTML.includes('class="action-btn selected"'),'chosen target action should remain visibly selected');
+    assert(appHarness.elements.get('action-content').innerHTML.includes('Assassinate · Choose a living player.'),'selected action should provide an immediate target prompt');
+    assert(appHarness.elements.get('game').classList.contains('target-focus'),'target selection should activate focus styling');
+    assert(appHarness.elements.get('player-seats').innerHTML.includes('target-candidate'),'living opponent targets should be marked without exposing cards');
+
+    const visualResponseState={...visualState,phase:'challenging',currentPlayer:0,myIndex:1,selectedAction:'assassinate',selectedTarget:1,
+      players:[{...visualPlayers[1],isMe:false},{...visualPlayers[0],isMe:true}],
+      responsePhase:{kind:'action',allowed:['CHALLENGE','PASS'],blockCharacters:[],responders:[{name:'Host',status:'waiting'}]}};
+    await deliverVisualState(visualResponseState,gameState=>gameState.code===fresh.code && gameState.phase==='challenging' && gameState.selectedAction==='assassinate');
+    assert(appHarness.elements.get('player-seats').innerHTML.includes('target-selected'),'server-selected target should remain highlighted during resolution');
+    const responseMarkup=appHarness.elements.get('challenge-panel').innerHTML;
+    assert(responseMarkup.includes('ASSASSINATE') && responseMarkup.includes('YOUR RESPONSE'),'response panel should show the action-to-response flow for eligible players');
+    assert(responseMarkup.includes('data-response="CHALLENGE"') && responseMarkup.includes('data-response="PASS"'),'eligible response actions should remain available');
+    assert(!responseMarkup.includes('data-response="BLOCK"'),'the presentation must not invent a response absent from server allowance');
+
+    const waitingResponseState={...visualResponseState,myIndex:0,responsePhase:{kind:'action',allowed:[],blockCharacters:[],responders:[{name:'Host',status:'PASS'}]}};
+    await deliverVisualState(waitingResponseState,gameState=>gameState.code===fresh.code && gameState.phase==='challenging' && gameState.myIndex===0);
+    const waitingMarkup=appHarness.elements.get('challenge-panel').innerHTML;
+    assert(waitingMarkup.includes('WAITING FOR RESPONSE') && waitingMarkup.includes('response-pass'),'response status should show waiting and a completed PASS clearly');
+    assert(!waitingMarkup.includes('data-response='),'players without an allowed response must not see action buttons');
+
+    const revealState={...waitingResponseState,phase:'resolving',responsePhase:null,
+      players:[{...waitingResponseState.players[0],cardCount:1},{...waitingResponseState.players[1],cardCount:2}],
+      cardReveal:{id:`${fresh.code}:reveal:1`,playerIndex:0,playerName:'Next Player',card:'duke',reason:'assassinate'}};
+    await deliverVisualState(revealState,gameState=>gameState.code===fresh.code && gameState.phase==='resolving' && gameState.cardReveal?.id===revealState.cardReveal.id);
+    const revealMarkup=appHarness.elements.get('card-reveal').innerHTML;
+    assert(revealMarkup.includes('Next Player lost Influence') && revealMarkup.includes('Duke') && revealMarkup.includes('INFLUENCE -1'),'card reveal should name the player, revealed card, and influence loss');
+    assert.strictEqual((revealMarkup.match(/<img\b/g)||[]).length,1,'public reveal must display exactly one revealed card');
+    assert.strictEqual(appHarness.elements.get('game').dataset.impact,'loss','influence reveal should trigger one short impact effect');
+    await wait(300);
+    assert.strictEqual(appHarness.elements.get('game').classList.contains('impact-feedback'),false,'impact styling should clean itself up after the short effect');
+    assert.strictEqual(appHarness.elements.get('game').dataset.impact,undefined,'impact metadata should not persist after cleanup');
 
     const responseHost=await connectTestClient(url);
     testClients.push(responseHost);

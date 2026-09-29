@@ -40,6 +40,7 @@
   let previousAudioSnapshot = null;
   let previousAudioLog = [];
   let audioLogSequence = 0;
+  let impactTimer = null;
   let leaveRequestInProgress = false;
   let cancelWaitingInProgress = false;
 
@@ -193,15 +194,21 @@
     let sawCounter = false;
     let challengedClaimSuccessfully = false;
     let challengedCounterSuccessfully = false;
+    let impactKind = null;
 
     for (const entry of addedEntries) {
       const eventId = `${eventPrefix}:${entry.type}:${entry.message}`;
-      if (entry.type === 'action') playSound('cardCast', eventId);
+      if (entry.type === 'action') {
+        playSound('cardCast', eventId);
+        if (/\bcoups\b/i.test(entry.message)) impactKind = 'coup';
+      }
       if (entry.type === 'counter') {
         sawCounter = true;
+        impactKind = 'block';
         playSound('counter', eventId);
       }
       if (entry.type === 'challenge') {
+        impactKind = 'challenge';
         if (/block challenge succeeds/i.test(entry.message)) {
           challengedCounterSuccessfully = true;
           challengedClaimSuccessfully = true;
@@ -242,6 +249,7 @@
       }
     }
 
+    if (impactKind) triggerImpact(impactKind);
     previousAudioSnapshot = nextState;
     previousAudioLog = nextLog.slice();
   }
@@ -427,6 +435,9 @@
     const myIndex = state.myIndex;
     const currentIndex = state.currentPlayer;
     const targeting = Boolean(pendingTargetAction && state.phase === 'selecting' && currentIndex === myIndex);
+    const selectedTarget = Number.isInteger(state.selectedTarget) ? state.selectedTarget : null;
+    const targetFocus = targeting || selectedTarget !== null;
+    byId('game').classList.toggle('target-focus', targetFocus);
     const targetHint = byId('target-hint');
     if (targetHint) targetHint.textContent = targeting ? 'Choose a living player at the table.' : '';
 
@@ -438,7 +449,8 @@
       const classes = ['opponent-seat'];
       if (!player.alive) classes.push('dead');
       if (index === currentIndex) classes.push('active');
-      if (targeting && index !== myIndex && player.alive) classes.push('seat-target');
+      if (targeting && index !== myIndex && player.alive) classes.push('seat-target', 'target-candidate');
+      if (selectedTarget === index) classes.push('target-selected');
       const inner = `<span class="seat-avatar">${escapeHtml(player.name.slice(0, 1).toUpperCase())}</span><span class="seat-name">${escapeHtml(player.name)}${player.isMe ? ' (You)' : ''}</span><span class="seat-info"><span class="seat-coins">${player.coins} C</span><span class="seat-cards">${player.cardCount} influence</span></span>${player.disconnected ? '<span class="connection-indicator">Reconnecting</span>' : ''}`;
       return `<div class="${classes.join(' ')}" style="left:${left}%;top:${top}%">${targeting && index !== myIndex && player.alive ? `<button class="seat-target" type="button" data-target-index="${index}" aria-label="Target ${escapeHtml(player.name)}">${inner}</button>` : inner}</div>`;
     }).join('');
@@ -457,10 +469,11 @@
     const available = me.coins >= 10 ? actions.filter(item => item.action === 'coup') : actions;
     const buttons = available.map(item => {
       const disabled = (item.action === 'coup' && me.coins < 7) || (item.action === 'assassinate' && me.coins < 3);
+      const selected = pendingTargetAction === item.action;
       const color = item.color ? ` style="background:${characterColors[item.color]}"` : '';
-      return `<button class="action-btn${disabled ? ' disabled' : ''}" type="button" data-select-action="${item.action}"${disabled ? ' disabled' : ''}><span class="char-icon"${color}>${item.icon}</span><span class="action-name">${item.label}</span><span class="action-cost">${item.detail}</span></button>`;
+      return `<button class="action-btn${disabled ? ' disabled' : ''}${selected ? ' selected' : ''}" type="button" data-select-action="${item.action}" aria-pressed="${selected}"${disabled ? ' disabled' : ''}><span class="char-icon"${color}>${item.icon}</span><span class="action-name">${item.label}</span><span class="action-cost">${item.detail}</span></button>`;
     }).join('');
-    content.innerHTML = `<h3>Your Turn</h3><div class="action-grid">${buttons}</div><p class="target-hint" id="target-hint">${pendingTargetAction ? 'Choose a living player at the table.' : ''}</p>`;
+    content.innerHTML = `<h3>Your Turn</h3><div class="action-grid">${buttons}</div><p class="target-hint" id="target-hint" aria-live="polite">${pendingTargetAction ? `${escapeHtml(actionLabel(pendingTargetAction))} · Choose a living player.` : 'Select an action.'}</p>`;
   }
 
   function actionLabel(action) {
@@ -485,24 +498,26 @@
 
     const current = state.players[state.currentPlayer];
     const responsePhase = state.responsePhase || { allowed: [], blockCharacters: [], responders: [] };
+    const canRespond = responsePhase.allowed.length > 0;
     const options = [];
 
     if (responsePhase.allowed.includes('CHALLENGE')) {
       const label = responsePhase.kind === 'counter' ? 'Challenge the block' : `Challenge ${current?.name || 'the claim'}`;
-      options.push(`<button class="challenge-option" type="button" data-response="CHALLENGE"><span class="challenge-option-title">Challenge</span><span class="challenge-option-desc">${escapeHtml(label)}.</span></button>`);
+      options.push(`<button class="challenge-option response-choice response-challenge" type="button" data-response="CHALLENGE" aria-pressed="false"><span class="challenge-option-title">Challenge</span><span class="challenge-option-desc">${escapeHtml(label)}.</span></button>`);
     }
     for (const character of responsePhase.blockCharacters || []) {
-      options.push(`<button class="challenge-option" type="button" data-response="BLOCK" data-block-character="${escapeHtml(character)}"><span class="challenge-option-title">Block with ${escapeHtml(characterNames[character] || character)}</span><span class="challenge-option-desc">Claim ${escapeHtml(characterNames[character] || character)}.</span></button>`);
+      options.push(`<button class="challenge-option response-choice response-block" type="button" data-response="BLOCK" data-block-character="${escapeHtml(character)}" aria-pressed="false"><span class="challenge-option-title">Block with ${escapeHtml(characterNames[character] || character)}</span><span class="challenge-option-desc">Claim ${escapeHtml(characterNames[character] || character)}.</span></button>`);
     }
     if (responsePhase.allowed.includes('PASS')) {
-      options.push('<button class="challenge-option" type="button" data-response="PASS"><span class="challenge-option-title">Pass</span></button>');
+      options.push('<button class="challenge-option response-choice response-pass" type="button" data-response="PASS" aria-pressed="false"><span class="challenge-option-title">Pass</span></button>');
     }
 
     const responders = (responsePhase.responders || []).map(responder => {
       const status = responder.status === 'waiting' ? 'Waiting...' : `✓ ${responder.status}`;
-      return `<div class="challenge-option-desc">${escapeHtml(responder.name)}: ${escapeHtml(status)}</div>`;
+      const statusClass = `response-${String(responder.status).toLowerCase().replace(/[^a-z]/g, '')}`;
+      return `<div class="response-status ${statusClass}"><span>${escapeHtml(responder.name)}</span><span>${escapeHtml(status)}</span></div>`;
     }).join('');
-    panel.innerHTML = `<h3>${escapeHtml(current?.name || 'Player')} · ${escapeHtml(actionLabel(state.selectedAction))}</h3><div class="challenge-options">${options.join('')}</div><div class="response-statuses" aria-live="polite">${responders}</div>${options.length ? '' : '<p class="modal-copy">Waiting for responses...</p>'}`;
+    panel.innerHTML = `<div class="response-flow" aria-live="polite"><strong>${escapeHtml(actionLabel(state.selectedAction).toUpperCase())}</strong><span aria-hidden="true">↓</span><span>${canRespond ? 'YOUR RESPONSE' : 'WAITING FOR RESPONSE'}</span></div><h3>${escapeHtml(current?.name || 'Player')} made a claim</h3><div class="challenge-options">${options.join('')}</div><div class="response-statuses" aria-live="polite">${responders}</div>${options.length ? '' : '<p class="modal-copy">Waiting for responses...</p>'}`;
   }
 
   function renderExchange() {
@@ -538,14 +553,29 @@
     }
     if (reveal.id === displayedCardRevealId) return;
     displayedCardRevealId = reveal.id;
+    triggerImpact(reveal.reason === 'coup' ? 'coup' : 'loss');
     const character = characterNames[reveal.card] || reveal.card;
-    banner.innerHTML = `<span>${escapeHtml(reveal.playerName)} lost an Influence<strong>${escapeHtml(character)}</strong></span><img src="/cards/${encodeURIComponent(reveal.card)}.jpg" alt="${escapeHtml(character)} revealed">`;
+    banner.innerHTML = `<span class="card-reveal-copy"><span>${escapeHtml(reveal.playerName)} lost Influence</span><strong>${escapeHtml(character)}</strong><small>INFLUENCE -1</small></span><img class="revealed-card-image" src="/cards/${encodeURIComponent(reveal.card)}.jpg" alt="${escapeHtml(character)} revealed">`;
     banner.hidden = false;
     if (cardRevealTimer) window.clearTimeout(cardRevealTimer);
     cardRevealTimer = window.setTimeout(() => {
       banner.hidden = true;
       cardRevealTimer = null;
-    }, 6500);
+    }, 2800);
+  }
+
+  function triggerImpact(kind) {
+    const game = byId('game');
+    if (impactTimer) window.clearTimeout(impactTimer);
+    game.classList.remove('impact-feedback');
+    game.dataset.impact = kind;
+    void game.offsetWidth;
+    game.classList.add('impact-feedback');
+    impactTimer = window.setTimeout(() => {
+      game.classList.remove('impact-feedback');
+      delete game.dataset.impact;
+      impactTimer = null;
+    }, 260);
   }
 
   function renderLog() {
@@ -577,7 +607,7 @@
     byId('deck-count').textContent = String(state.deckCount ?? 0);
     byId('turn-indicator').textContent = state.state === 'finished' ? 'Game Over' : `${current?.name || 'Player'}'s turn`;
     byId('connection-state').textContent = socket?.connected ? 'Connected' : 'Reconnecting...';
-    byId('game-message').textContent = state.phase === 'selecting' ? (state.currentPlayer === state.myIndex ? 'Choose an action.' : 'Waiting for the active player.') : state.phase === 'challenging' ? 'Challenge or block the claim.' : state.phase === 'exchange_select' ? 'Choose cards to keep.' : 'Resolving action...';
+    byId('game-message').textContent = state.state === 'finished' ? 'Game over.' : state.phase === 'selecting' ? (state.currentPlayer === state.myIndex ? 'Choose an action.' : 'Waiting for the active player.') : state.phase === 'challenging' ? `${actionLabel(state.selectedAction)} · Waiting for response.` : state.phase === 'exchange_select' ? 'Exchange · Choose cards to keep.' : `${actionLabel(state.selectedAction)} · Resolving...`;
     if (state.phase !== 'selecting') pendingTargetAction = null;
     renderSeats();
     renderActions();
@@ -652,9 +682,12 @@
       return;
     }
     if (button.dataset.response) {
+      button.classList.add('is-selected');
+      button.setAttribute('aria-pressed', 'true');
       button.disabled = true;
       const response = { type: button.dataset.response };
       if (button.dataset.blockCharacter) response.char = button.dataset.blockCharacter;
+      if (response.type === 'PASS') playSound('ui', `${state?.code}:response:${state?.log?.length || 0}:${state?.myIndex}:pass`);
       return socket?.emit('actionResponse', response, result => {
         if (result?.error) {
           showToast(result.error, true);
