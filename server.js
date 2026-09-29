@@ -51,11 +51,14 @@ function createRoom(hostId, hostName) {
   const code = generateUniqueCode();
   const room = {
     code,
-    players: [{ id: hostId, name: hostName, coins: 2, cards: [], alive: true, disconnected: false, disconnectTimer: null }],
+    players: [{ id: hostId, name: hostName, coins: 2, cards: [], cardIds: [], alive: true, disconnected: false, disconnectTimer: null }],
     state: 'lobby',
     phase: 'waiting',
     deck: [],
+    deckCardIds: [],
     discard: [],
+    discardCardIds: [],
+    cardIdentitySequence: 0,
     currentPlayer: 0,
     selectedAction: null,
     selectedTarget: null,
@@ -73,7 +76,9 @@ function createRoom(hostId, hostName) {
     // Exchange UI state
     exchangePhase: null,       // null | 'selecting'
     exchangeDrawn: [],         // cards drawn for exchange
+    exchangeDrawnIds: [],
     exchangeHand: [],          // full hand shown to player during exchange
+    exchangeHandIds: [],
     // Counter challenge state
     counterChallengePhase: false,
     counterChallengeTimer: null,
@@ -89,6 +94,37 @@ function createRoom(hostId, hostName) {
   };
   rooms.set(code, room);
   return room;
+}
+
+function createCardId(room) {
+  room.cardIdentitySequence += 1;
+  return `${room.code}:card:${room.cardIdentitySequence}`;
+}
+
+function ensurePlayerCardIds(room, player) {
+  if (!Array.isArray(player.cardIds)) player.cardIds = [];
+  while (player.cardIds.length < player.cards.length) player.cardIds.push(createCardId(room));
+  if (player.cardIds.length > player.cards.length) player.cardIds.length = player.cards.length;
+}
+
+function ensureDeckCardIds(room) {
+  if (!Array.isArray(room.deckCardIds)) room.deckCardIds = [];
+  while (room.deckCardIds.length < room.deck.length) room.deckCardIds.push(createCardId(room));
+  if (room.deckCardIds.length > room.deck.length) room.deckCardIds.length = room.deck.length;
+}
+
+function drawCard(room) {
+  ensureDeckCardIds(room);
+  return { card: room.deck.pop(), cardId: room.deckCardIds.pop() };
+}
+
+function shuffleDeck(room) {
+  ensureDeckCardIds(room);
+  for (let i = room.deck.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [room.deck[i], room.deck[j]] = [room.deck[j], room.deck[i]];
+    [room.deckCardIds[i], room.deckCardIds[j]] = [room.deckCardIds[j], room.deckCardIds[i]];
+  }
 }
 
 function leaveFinishedRoom(room, playerId) {
@@ -130,9 +166,16 @@ function cancelWaitingRoom(room, playerId) {
 function startGame(room) {
   const playerCount = room.players.length;
   room.deck = createDeck(playerCount);
+  room.deckCardIds = room.deck.map(() => createCardId(room));
+  room.discardCardIds = [];
+  room.exchangeDrawnIds = [];
+  room.exchangeHandIds = [];
   
   for (const player of room.players) {
-    player.cards = [room.deck.pop(), room.deck.pop()];
+    const firstCard = drawCard(room);
+    const secondCard = drawCard(room);
+    player.cards = [firstCard.card, secondCard.card];
+    player.cardIds = [firstCard.cardId, secondCard.cardId];
     player.coins = 2;
     player.alive = true;
     player.disconnected = false;
@@ -193,6 +236,7 @@ function findRoomByCode(code) {
 function getPlayerView(room, playerId) {
   const player = room.players.find(p => p.id === playerId);
   if (!player) return null;
+  for (const roomPlayer of room.players) ensurePlayerCardIds(room, roomPlayer);
   
   const view = {
     code: room.code,
@@ -213,15 +257,19 @@ function getPlayerView(room, playerId) {
       alive: p.alive,
       isMe: p.id === playerId,
       disconnected: p.disconnected || false,
-      cards: p.id === playerId ? p.cards : null
+      cards: p.id === playerId ? p.cards : null,
+      cardIds: p.id === playerId ? p.cardIds : null
     })),
     myCards: player.cards,
+    myCardIds: player.cardIds,
     winner: room.winner,
     log: room.log.slice(-30),
     // Exchange UI
     exchangePhase: room.exchangePhase,
     exchangeHand: room.exchangePhase === 'selecting' && player.id === room.players[room.currentPlayer]?.id
       ? room.exchangeHand : null,
+    exchangeHandIds: room.exchangePhase === 'selecting' && player.id === room.players[room.currentPlayer]?.id
+      ? room.exchangeHandIds : null,
     // Counter challenge
     counterChallengePhase: room.counterChallengePhase,
     counterChallengeTimerEnd: room.counterChallengeTimerEnd,
@@ -289,7 +337,9 @@ function nextTurn(room) {
   room.responsePhase = null;
   room.exchangePhase = null;
   room.exchangeDrawn = [];
+  room.exchangeDrawnIds = [];
   room.exchangeHand = [];
+  room.exchangeHandIds = [];
   room.counterChallengePhase = false;
   room.pendingCounter = null;
   room.lastLostCard = null;
@@ -646,9 +696,12 @@ function resolveExchange(room) {
 
 function beginExchangeSelection(room) {
   const player = room.players[room.currentPlayer];
-  const drawn = [room.deck.pop(), room.deck.pop()];
-  room.exchangeDrawn = drawn;
-  room.exchangeHand = [...player.cards, ...drawn];
+  ensurePlayerCardIds(room, player);
+  const drawnCards = [drawCard(room), drawCard(room)];
+  room.exchangeDrawn = drawnCards.map(entry => entry.card);
+  room.exchangeDrawnIds = drawnCards.map(entry => entry.cardId);
+  room.exchangeHand = [...player.cards, ...room.exchangeDrawn];
+  room.exchangeHandIds = [...player.cardIds, ...room.exchangeDrawnIds];
   room.exchangePhase = 'selecting';
   room.phase = 'exchange_select';
   room.timerEnd = Date.now() + 15000;
@@ -669,6 +722,11 @@ function finishExchange(room, keepIndices, automatic = false) {
   const player = room.players[room.currentPlayer];
   const hand = Array.isArray(room.exchangeHand) ? room.exchangeHand.slice() : [];
   if (!player || room.exchangePhase !== 'selecting' || hand.length === 0) return false;
+  ensurePlayerCardIds(room, player);
+  if (!Array.isArray(room.exchangeHandIds) || room.exchangeHandIds.length !== hand.length) {
+    room.exchangeHandIds = hand.map((_, index) => index < player.cardIds.length ? player.cardIds[index] : createCardId(room));
+  }
+  const handIds = room.exchangeHandIds.slice();
 
   const keepCount = player.cards.length;
   if (keepCount < 1 || hand.length < keepCount) return false;
@@ -681,23 +739,31 @@ function finishExchange(room, keepIndices, automatic = false) {
 
   const keepSet = new Set(indices);
   const kept = [];
+  const keptIds = [];
   const returned = [];
+  const returnedIds = [];
   for (let i = 0; i < hand.length; i++) {
-    if (keepSet.has(i) && kept.length < keepCount) kept.push(hand[i]);
-    else returned.push(hand[i]);
+    if (keepSet.has(i) && kept.length < keepCount) {
+      kept.push(hand[i]);
+      keptIds.push(handIds[i]);
+    } else {
+      returned.push(hand[i]);
+      returnedIds.push(handIds[i]);
+    }
   }
 
   // Exchange cards are returned to the deck, never silently discarded.
   room.deck.push(...returned);
-  for (let i = room.deck.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [room.deck[i], room.deck[j]] = [room.deck[j], room.deck[i]];
-  }
+  room.deckCardIds.push(...returnedIds);
+  shuffleDeck(room);
   player.cards = kept;
+  player.cardIds = keptIds;
 
   room.exchangePhase = null;
   room.exchangeDrawn = [];
+  room.exchangeDrawnIds = [];
   room.exchangeHand = [];
+  room.exchangeHandIds = [];
   if (room.timer) clearTimeout(room.timer);
   room.timer = null;
   room.timerEnd = null;
